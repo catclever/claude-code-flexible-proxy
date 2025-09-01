@@ -10,13 +10,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import litellm
 import uuid
 import time
-from dotenv import load_dotenv
 import re
 from datetime import datetime
 import sys
-
-# Load environment variables from .env file
-load_dotenv()
+from config import config_manager as global_config
 
 # Configure logging
 logging.basicConfig(
@@ -85,35 +82,309 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 # Get OpenAI base URL from environment (if set)
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL")
 
-# Get preferred provider (default to openai)
-PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
+# Dynamic Configuration Manager
+class DynamicConfig:
+    """动态配置管理类，用于在运行时存储和更新模型配置"""
+    def __init__(self):
+        # 从环境变量初始化配置
+        self.preferred_provider = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
+        self.big_model = os.environ.get("BIG_MODEL", "gpt-4.1")
+        self.small_model = os.environ.get("SMALL_MODEL", "gpt-4.1-mini")
+        self.conversation_history = []  # 存储对话历史
+        self.max_history = 100  # 最大对话历史数量
+        
+        # 代理服务器模式控制
+        self.proxy_server_enabled = os.environ.get("PROXY_SERVER_ENABLED", "true").lower() == "true"
+        self.bypass_message = "Proxy server is disabled. Please use direct API endpoints."
+        
+        logger.info(f"代理服务器状态: enabled={self.proxy_server_enabled}")
+    
+    def update_config(self, preferred_provider=None, big_model=None, small_model=None):
+        """更新配置"""
+        if preferred_provider is not None:
+            self.preferred_provider = preferred_provider.lower()
+        if big_model is not None:
+            self.big_model = big_model
+        if small_model is not None:
+            self.small_model = small_model
+        
+        logger.info(f"配置已更新: provider={self.preferred_provider}, big_model={self.big_model}, small_model={self.small_model}")
+    
+    def toggle_proxy_server(self, enabled=None):
+        """切换代理服务器模式"""
+        if enabled is not None:
+            self.proxy_server_enabled = enabled
+        else:
+            self.proxy_server_enabled = not self.proxy_server_enabled
+        
+        status = "启用" if self.proxy_server_enabled else "禁用"
+        logger.info(f"代理服务器模式已{status}")
+        return self.proxy_server_enabled
+    
+    def get_config(self):
+        """获取当前配置"""
+        return {
+            "preferred_provider": self.preferred_provider,
+            "big_model": self.big_model,
+            "small_model": self.small_model,
+            "proxy_server_enabled": self.proxy_server_enabled
+        }
+    
+    def sync_with_global_config(self):
+        """与全局配置同步"""
+        global_status = global_config.get_status()
+        self.proxy_server_enabled = global_status["proxy_enabled"]
+        self.big_model = global_status["big_model"]
+        self.small_model = global_status["small_model"]
+    
+    def add_conversation_message(self, role, content, model_used, timestamp=None):
+        """添加对话消息到历史记录"""
+        if timestamp is None:
+            timestamp = datetime.now().isoformat()
+        
+        message = {
+            "timestamp": timestamp,
+            "role": role,
+            "content": content,
+            "model_used": model_used
+        }
+        
+        self.conversation_history.append(message)
+        
+        # 保持历史记录数量在限制内
+        if len(self.conversation_history) > self.max_history:
+            self.conversation_history = self.conversation_history[-self.max_history:]
+    
+    def get_conversation_history(self, limit=None):
+        """获取对话历史"""
+        if limit:
+            return self.conversation_history[-limit:]
+        return self.conversation_history
+    
+    def get_conversation_for_model(self):
+        """获取适合传递给模型的对话格式"""
+        messages = []
+        for msg in self.conversation_history:
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+        return messages
+    
+    def clear_conversation(self):
+        """清空对话历史"""
+        self.conversation_history = []
+    
+    def add_request_log(self, request_data):
+        """保持原有接口兼容性，但现在主要用于内部记录"""
+        # 这里可以提取消息并添加到对话历史
+        if request_data.get('body') and request_data.get('method') == 'POST':
+            body = request_data['body']
+            if 'messages' in body:
+                # 提取最新的用户消息
+                for msg in body['messages']:
+                    if msg.get('role') in ['user', 'assistant']:
+                        self.add_conversation_message(
+                            role=msg['role'],
+                            content=msg.get('content', ''),
+                            model_used=request_data.get('model', 'unknown'),
+                            timestamp=request_data.get('timestamp')
+                        )
+    
+    def get_request_logs(self, limit=None):
+        """保持原有接口兼容性，转换格式"""
+        history = self.get_conversation_history(limit)
+        # 转换为原来期望的日志格式
+        logs = []
+        for msg in history:
+            logs.append({
+                "timestamp": msg["timestamp"],
+                "method": "POST",
+                "path": "/v1/messages",
+                "headers": {},
+                "body": {"messages": [{"role": msg["role"], "content": msg["content"]}]},
+                "model": msg["model_used"],
+                "original_model": msg["model_used"]
+            })
+        return logs
+    
+    def clear_request_logs(self):
+        """保持原有接口兼容性"""
+        self.clear_conversation()
 
-# Get model mapping configuration from environment
-# Default to latest OpenAI models if not set
-BIG_MODEL = os.environ.get("BIG_MODEL", "gpt-4.1")
-SMALL_MODEL = os.environ.get("SMALL_MODEL", "gpt-4.1-mini")
+# 使用新的配置系统 (global_config 来自 config.py)
+# config_manager = DynamicConfig() # 已移除旧配置系统
+
+# 透明转发函数将在MessagesRequest定义后声明
+
+# 为了向后兼容，保留原有的全局变量，但它们现在从新配置系统获取
+status = global_config.get_status()
+PREFERRED_PROVIDER = "mixed"  # 新配置系统不使用单一首选提供商
+BIG_MODEL = status["big_model"]
+SMALL_MODEL = status["small_model"]
 
 # List of OpenAI models
 OPENAI_MODELS = [
+    # O系列 - 推理模型
     "o3-mini",
-    "o1",
+    "o1", 
     "o1-mini",
     "o1-pro",
-    "gpt-4.5-preview",
+    "o1-preview",
+    
+    # GPT-4系列 - 最新版本
     "gpt-4o",
-    "gpt-4o-audio-preview",
-    "chatgpt-4o-latest",
+    "gpt-4o-2024-11-20",
+    "gpt-4o-2024-08-06", 
+    "gpt-4o-2024-05-13",
     "gpt-4o-mini",
-    "gpt-4o-mini-audio-preview",
+    "gpt-4o-mini-2024-07-18",
+    "gpt-4o-audio-preview",
+    "gpt-4o-realtime-preview",
+    "chatgpt-4o-latest",
+    
+    # GPT-4 Turbo系列
+    "gpt-4-turbo",
+    "gpt-4-turbo-2024-04-09",
+    "gpt-4-turbo-preview",
+    "gpt-4-0125-preview",
+    "gpt-4-1106-preview",
+    
+    # GPT-4经典版本
+    "gpt-4",
+    "gpt-4-0613",
+    "gpt-4-0314",
+    
+    # GPT-3.5系列
+    "gpt-3.5-turbo",
+    "gpt-3.5-turbo-0125",
+    "gpt-3.5-turbo-1106",
+    "gpt-3.5-turbo-16k",
+    
+    # 其他特殊版本
+    "gpt-4.5-preview",
     "gpt-4.1",  # Added default big model
-    "gpt-4.1-mini" # Added default small model
+    "gpt-4.1-mini", # Added default small model
+    "gpt-4o-mini-audio-preview"
 ]
 
 # List of Gemini models
 GEMINI_MODELS = [
+    # Gemini 2.0系列
+    "gemini-2.0-flash-exp",
+    "gemini-2.0-flash-thinking-exp", 
+    "gemini-2.0-flash",
+    
+    # Gemini 1.5系列
+    "gemini-1.5-pro",
+    "gemini-1.5-pro-002",
+    "gemini-1.5-pro-001", 
+    "gemini-1.5-pro-exp-0827",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-002",
+    "gemini-1.5-flash-001",
+    "gemini-1.5-flash-8b",
+    
+    # Gemini 1.0系列
+    "gemini-1.0-pro",
+    "gemini-1.0-pro-001",
+    "gemini-1.0-pro-latest",
+    
+    # 实验版本
+    "gemini-exp-1114",
+    "gemini-exp-1121",
+    
+    # 向后兼容（旧版本名称）
     "gemini-2.5-flash",
     "gemini-2.5-pro"
 ]
+
+# List of Anthropic models  
+ANTHROPIC_MODELS = [
+    # Claude 3.5系列
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-sonnet-20240620", 
+    "claude-3-5-haiku-20241022",
+    
+    # Claude 3系列
+    "claude-3-opus-20240229",
+    "claude-3-sonnet-20240229",
+    "claude-3-haiku-20240307",
+    
+    # Claude 2系列
+    "claude-2.1",
+    "claude-2.0",
+    
+    # Claude Instant
+    "claude-instant-1.2"
+]
+
+# Helper function to determine model provider
+def get_model_provider(model_name: str) -> str:
+    """确定模型属于哪个提供商 - 使用动态配置"""
+    provider_name = global_config.find_model_provider(model_name)
+    if provider_name:
+        return provider_name
+    
+    # 回退到硬编码检查（向后兼容）
+    if model_name in OPENAI_MODELS:
+        return "openai"
+    elif model_name in GEMINI_MODELS:
+        return "gemini"
+    elif model_name in ANTHROPIC_MODELS:
+        return "anthropic"
+    else:
+        return "unknown"
+
+# Helper function to add correct provider prefix
+def add_model_prefix(model_name: str) -> str:
+    """为模型添加正确的提供商前缀"""
+    if model_name.startswith(('openai/', 'gemini/', 'anthropic/')):
+        return model_name
+    
+    provider = get_model_provider(model_name)
+    if provider != "unknown":
+        return f"{provider}/{model_name}"
+    return model_name
+
+# Enhanced mapping presets for common scenarios
+MAPPING_PRESETS = {
+    "openai_only": {
+        "description": "OpenAI模型组合",
+        "big_model": "gpt-4o",
+        "small_model": "gpt-4o-mini"
+    },
+    "gemini_only": {
+        "description": "Gemini模型组合", 
+        "big_model": "gemini-1.5-pro",
+        "small_model": "gemini-1.5-flash"
+    },
+    "anthropic_only": {
+        "description": "Anthropic模型组合",
+        "big_model": "claude-3-5-sonnet-20241022",
+        "small_model": "claude-3-5-haiku-20241022"
+    },
+    "mixed_premium": {
+        "description": "混合高端组合：GPT-4o + Gemini Flash",
+        "big_model": "gpt-4o", 
+        "small_model": "gemini-1.5-flash"
+    },
+    "mixed_cost_effective": {
+        "description": "混合经济组合：Gemini Pro + GPT-4o Mini", 
+        "big_model": "gemini-1.5-pro",
+        "small_model": "gpt-4o-mini"
+    },
+    "reasoning_focused": {
+        "description": "推理优化组合：O1 + GPT-4o Mini",
+        "big_model": "o1-preview", 
+        "small_model": "gpt-4o-mini"
+    },
+    "speed_focused": {
+        "description": "速度优化组合：Claude Haiku + Gemini Flash",
+        "big_model": "claude-3-5-haiku-20241022",
+        "small_model": "gemini-1.5-flash"
+    }
+}
 
 # Helper function to clean schema for Gemini
 def clean_gemini_schema(schema: Any) -> Any:
@@ -195,7 +466,12 @@ class MessagesRequest(BaseModel):
         original_model = v
         new_model = v # Default to original value
 
-        logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
+        # 从新配置系统获取当前设置
+        current_config = global_config.get_status()
+        big_model = current_config["big_model"]
+        small_model = current_config["small_model"]
+        
+        logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', BIG='{big_model}', SMALL='{small_model}'")
 
         # Remove provider prefixes for easier matching
         clean_v = v
@@ -206,40 +482,33 @@ class MessagesRequest(BaseModel):
         elif clean_v.startswith('gemini/'):
             clean_v = clean_v[7:]
 
-        # --- Mapping Logic --- START ---
+        # --- Enhanced Mapping Logic --- START ---
         mapped = False
-        if PREFERRED_PROVIDER == "anthropic":
-            # Don't remap to big/small models, just add the prefix
-            new_model = f"anthropic/{clean_v}"
+        
+        # Map Haiku to small_model (simple mapping without provider prefix)
+        if 'haiku' in clean_v.lower():
+            new_model = small_model
             mapped = True
+            logger.debug(f"🔄 HAIKU MAPPING: '{original_model}' → '{new_model}' (small_model={small_model})")
 
-        # Map Haiku to SMALL_MODEL based on provider preference
-        elif 'haiku' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{SMALL_MODEL}"
-                mapped = True
-            else:
-                new_model = f"openai/{SMALL_MODEL}"
-                mapped = True
-
-        # Map Sonnet to BIG_MODEL based on provider preference
+        # Map Sonnet to big_model (simple mapping without provider prefix)
         elif 'sonnet' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{BIG_MODEL}"
-                mapped = True
-            else:
-                new_model = f"openai/{BIG_MODEL}"
-                mapped = True
+            new_model = big_model
+            mapped = True
+            logger.debug(f"🔄 SONNET MAPPING: '{original_model}' → '{new_model}' (big_model={big_model})")
 
-        # Add prefixes to non-mapped models if they match known lists
+        # Add prefixes to direct model names if they match known lists
         elif not mapped:
-            if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
+            if clean_v in ANTHROPIC_MODELS and not v.startswith('anthropic/'):
+                new_model = f"anthropic/{clean_v}"
+                mapped = True
+            elif clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
                 new_model = f"gemini/{clean_v}"
-                mapped = True # Technically mapped to add prefix
+                mapped = True
             elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
                 new_model = f"openai/{clean_v}"
-                mapped = True # Technically mapped to add prefix
-        # --- Mapping Logic --- END ---
+                mapped = True
+        # --- Enhanced Mapping Logic --- END ---
 
         if mapped:
             logger.debug(f"📌 MODEL MAPPING: '{original_model}' ➡️ '{new_model}'")
@@ -273,7 +542,12 @@ class TokenCountRequest(BaseModel):
         original_model = v
         new_model = v # Default to original value
 
-        logger.debug(f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
+        # 从新配置系统获取当前设置
+        current_config = global_config.get_status()
+        big_model = current_config["big_model"]
+        small_model = current_config["small_model"]
+        
+        logger.debug(f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', BIG='{big_model}', SMALL='{small_model}'")
 
         # Remove provider prefixes for easier matching
         clean_v = v
@@ -286,23 +560,17 @@ class TokenCountRequest(BaseModel):
 
         # --- Mapping Logic --- START ---
         mapped = False
-        # Map Haiku to SMALL_MODEL based on provider preference
+        # Map Haiku to small_model (simple mapping without provider prefix)
         if 'haiku' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{SMALL_MODEL}"
-                mapped = True
-            else:
-                new_model = f"openai/{SMALL_MODEL}"
-                mapped = True
+            new_model = small_model
+            mapped = True
+            logger.debug(f"🔄 HAIKU TOKEN MAPPING: '{original_model}' → '{new_model}' (small_model={small_model})")
 
-        # Map Sonnet to BIG_MODEL based on provider preference
+        # Map Sonnet to big_model (simple mapping without provider prefix)
         elif 'sonnet' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{BIG_MODEL}"
-                mapped = True
-            else:
-                new_model = f"openai/{BIG_MODEL}"
-                mapped = True
+            new_model = big_model
+            mapped = True
+            logger.debug(f"🔄 SONNET TOKEN MAPPING: '{original_model}' → '{new_model}' (big_model={big_model})")
 
         # Add prefixes to non-mapped models if they match known lists
         elif not mapped:
@@ -331,6 +599,59 @@ class TokenCountRequest(BaseModel):
 class TokenCountResponse(BaseModel):
     input_tokens: int
 
+# 动态配置相关的数据模型
+class ConfigUpdateRequest(BaseModel):
+    preferred_provider: Optional[str] = None
+    big_model: Optional[str] = None
+    small_model: Optional[str] = None
+    preserve_conversation: Optional[bool] = True  # 默认保持对话历史
+    preset: Optional[str] = None  # 使用预设配置
+
+class ModelListResponse(BaseModel):
+    openai_models: List[str]
+    gemini_models: List[str] 
+    anthropic_models: List[str]
+    mapping_presets: Dict[str, Dict[str, str]]
+    total_models: int
+
+class ProxyServerToggleRequest(BaseModel):
+    enabled: bool
+    message: Optional[str] = None
+
+class ProxyServerStatusResponse(BaseModel):
+    proxy_server_enabled: bool
+    message: str
+    claude_code_should_use_proxy: bool
+
+class ConfigResponse(BaseModel):
+    preferred_provider: str
+    big_model: str
+    small_model: str
+    message: str
+
+class RequestLogEntry(BaseModel):
+    timestamp: str
+    method: str
+    path: str
+    headers: Dict[str, str]
+    body: Optional[Dict[str, Any]] = None
+    model: Optional[str] = None
+    original_model: Optional[str] = None
+
+class ConversationMessage(BaseModel):
+    timestamp: str
+    role: str
+    content: Union[str, List[Dict[str, Any]]]
+    model_used: str
+
+class ConversationHistoryResponse(BaseModel):
+    messages: List[ConversationMessage]
+    total_count: int
+
+class RequestLogsResponse(BaseModel):
+    logs: List[RequestLogEntry]
+    total_count: int
+
 class Usage(BaseModel):
     input_tokens: int
     output_tokens: int
@@ -353,11 +674,56 @@ async def log_requests(request: Request, call_next):
     method = request.method
     path = request.url.path
     
+    # 截取请求数据
+    request_data = {
+        "timestamp": datetime.now().isoformat(),
+        "method": method,
+        "path": path,
+        "headers": dict(request.headers),
+        "body": None,
+        "model": None,
+        "original_model": None
+    }
+    
+    # 如果是POST请求，尝试读取请求体
+    if method == "POST" and path in ["/v1/messages", "/v1/messages/count_tokens"]:
+        try:
+            # 读取请求体
+            body = await request.body()
+            if body:
+                body_str = body.decode('utf-8')
+                body_json = json.loads(body_str)
+                request_data["body"] = body_json
+                
+                # 提取模型信息
+                if "model" in body_json:
+                    request_data["model"] = body_json["model"]
+                if "original_model" in body_json:
+                    request_data["original_model"] = body_json["original_model"]
+                
+                # 重新创建请求对象，因为body已经被读取
+                from fastapi import Request as FastAPIRequest
+                from starlette.requests import Request as StarletteRequest
+                
+                # 创建新的请求对象
+                scope = request.scope.copy()
+                receive = lambda: {"type": "http.request", "body": body}
+                request = StarletteRequest(scope, receive)
+        except Exception as e:
+            logger.debug(f"Error reading request body: {e}")
+    
     # Log only basic request details at debug level
     logger.debug(f"Request: {method} {path}")
     
     # Process the request and get the response
     response = await call_next(request)
+    
+    # 添加到新配置系统的日志中
+    global_config.add_debug_log(
+        "request",
+        f"{method} {path}",
+        {"method": method, "path": path, "status_code": response.status_code}
+    )
     
     return response
 
@@ -866,6 +1232,9 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
         has_sent_stop_reason = False
         last_tool_index = 0
         
+        # 用于记录对话历史
+        full_response_text = ""
+        
         # Process each chunk
         async for chunk in response_generator:
             try:
@@ -904,6 +1273,7 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                     # Accumulate text content
                     if delta_content is not None and delta_content != "":
                         accumulated_text += delta_content
+                        full_response_text += delta_content  # 记录完整响应文本
                         
                         # Always emit text deltas if no tool calls started
                         if tool_index is None and not text_block_closed:
@@ -1043,6 +1413,39 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                         
                         # Send final [DONE] marker to match Anthropic's behavior
                         yield "data: [DONE]\n\n"
+                        
+                        # 记录对话历史
+                        try:
+                            # 记录用户消息
+                            for msg in original_request.messages:
+                                if msg.role in ['user', 'assistant']:
+                                    content_text = ""
+                                    if isinstance(msg.content, str):
+                                        content_text = msg.content
+                                    elif isinstance(msg.content, list):
+                                        for block in msg.content:
+                                            if hasattr(block, "type") and block.type == "text":
+                                                content_text += block.text + "\n"
+                                            elif isinstance(block, dict) and block.get("type") == "text":
+                                                content_text += block.get("text", "") + "\n"
+                                    
+                                    if content_text.strip():
+                                        global_config.add_conversation_message(
+                                            role=msg.role,
+                                            content=content_text.strip(),
+                                            model_used=original_request.model
+                                        )
+                            
+                            # 记录助手回复
+                            if full_response_text.strip():
+                                global_config.add_conversation_message(
+                                    role="assistant",
+                                    content=full_response_text.strip(),
+                                    model_used=original_request.model
+                                )
+                        except Exception as conv_error:
+                            logger.error(f"Error recording streaming conversation history: {conv_error}")
+                        
                         return
             except Exception as e:
                 # Log error but continue processing other chunks
@@ -1069,6 +1472,38 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
             
             # Send final [DONE] marker to match Anthropic's behavior
             yield "data: [DONE]\n\n"
+            
+            # 记录对话历史
+            try:
+                # 记录用户消息
+                for msg in original_request.messages:
+                    if msg.role in ['user', 'assistant']:
+                        content_text = ""
+                        if isinstance(msg.content, str):
+                            content_text = msg.content
+                        elif isinstance(msg.content, list):
+                            for block in msg.content:
+                                if hasattr(block, "type") and block.type == "text":
+                                    content_text += block.text + "\n"
+                                elif isinstance(block, dict) and block.get("type") == "text":
+                                    content_text += block.get("text", "") + "\n"
+                        
+                        if content_text.strip():
+                            global_config.add_conversation_message(
+                                role=msg.role,
+                                content=content_text.strip(),
+                                model_used=original_request.model
+                            )
+                
+                # 记录助手回复
+                if full_response_text.strip():
+                    global_config.add_conversation_message(
+                        role="assistant",
+                        content=full_response_text.strip(),
+                        model_used=original_request.model
+                    )
+            except Exception as conv_error:
+                logger.error(f"Error recording streaming conversation history (fallback): {conv_error}")
     
     except Exception as e:
         import traceback
@@ -1091,6 +1526,12 @@ async def create_message(
     raw_request: Request
 ):
     try:
+        # 检查代理服务器是否启用
+        if not global_config.current_config["proxy_enabled"]:
+            # 透明模式：直接转发到 Anthropic API
+            logger.info("🔄 代理禁用，透明转发到 Anthropic API")
+            return await forward_to_anthropic(request, raw_request)
+        
         # print the body here
         body = await raw_request.body()
     
@@ -1112,24 +1553,61 @@ async def create_message(
         
         logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
         
+        # 记录调试日志 - 包含完整Anthropic请求内容
+        global_config.add_debug_log(
+            "request",
+            f"Anthropic messages request: {request.model}",
+            {
+                "model": request.model,
+                "messages_count": len(request.messages),
+                "messages": [{"role": msg.role, "content": msg.content} for msg in request.messages],
+                "max_tokens": request.max_tokens,
+                "temperature": request.temperature,
+                "stream": request.stream,
+                "full_request": {
+                    "model": request.model,
+                    "messages": [{"role": msg.role, "content": msg.content} for msg in request.messages],
+                    "max_tokens": request.max_tokens,
+                    "temperature": request.temperature,
+                    "stream": request.stream,
+                    "top_k": getattr(request, 'top_k', None),
+                    "top_p": getattr(request, 'top_p', None),
+                    "stop_sequences": getattr(request, 'stop_sequences', None)
+                }
+            }
+        )
+        
         # Convert Anthropic request to LiteLLM format
         litellm_request = convert_anthropic_to_litellm(request)
         
-        # Determine which API key to use based on the model
-        if request.model.startswith("openai/"):
-            litellm_request["api_key"] = OPENAI_API_KEY
-            # Use custom OpenAI base URL if configured
-            if OPENAI_BASE_URL:
-                litellm_request["api_base"] = OPENAI_BASE_URL
-                logger.debug(f"Using OpenAI API key and custom base URL {OPENAI_BASE_URL} for model: {request.model}")
+        # Determine which API key to use based on the model using new config system
+        provider_name = global_config.find_model_provider(request.model)
+        if provider_name and provider_name in global_config.providers:
+            provider = global_config.providers[provider_name]
+            litellm_request["api_key"] = provider.api_key
+            litellm_request["api_base"] = provider.base_url  # LiteLLM will append /chat/completions automatically
+            logger.debug(f"Using {provider.name} API key and base URL {litellm_request['api_base']} for model: {request.model}")
+            
+            # Add provider prefix to model name for LiteLLM
+            if provider.api_format == "openai":
+                # For OpenAI-compatible providers, use openai/ prefix with the actual model name
+                if not request.model.startswith("openai/"):
+                    litellm_request["model"] = f"openai/{request.model}"
             else:
-                logger.debug(f"Using OpenAI API key for model: {request.model}")
-        elif request.model.startswith("gemini/"):
-            litellm_request["api_key"] = GEMINI_API_KEY
-            logger.debug(f"Using Gemini API key for model: {request.model}")
+                # For other providers, add provider-specific prefix if needed
+                if not request.model.startswith(f"{provider_name}/"):
+                    litellm_request["model"] = f"{provider_name}/{request.model}"
         else:
-            litellm_request["api_key"] = ANTHROPIC_API_KEY
-            logger.debug(f"Using Anthropic API key for model: {request.model}")
+            # Fallback to old logic for backward compatibility
+            if request.model.startswith("openai/"):
+                litellm_request["api_key"] = OPENAI_API_KEY
+                if OPENAI_BASE_URL:
+                    litellm_request["api_base"] = OPENAI_BASE_URL
+            elif request.model.startswith("gemini/"):
+                litellm_request["api_key"] = GEMINI_API_KEY
+            else:
+                litellm_request["api_key"] = ANTHROPIC_API_KEY
+            logger.debug(f"Using fallback API key selection for model: {request.model}")
         
         # For OpenAI models - modify request format to work with limitations
         if "openai" in litellm_request["model"] and "messages" in litellm_request:
@@ -1313,6 +1791,78 @@ async def create_message(
             # Convert LiteLLM response to Anthropic format
             anthropic_response = convert_litellm_to_anthropic(litellm_response, request)
             
+            # 记录对话历史
+            try:
+                # 记录用户消息
+                for msg in request.messages:
+                    if msg.role in ['user', 'assistant']:
+                        content_text = ""
+                        if isinstance(msg.content, str):
+                            content_text = msg.content
+                        elif isinstance(msg.content, list):
+                            # 从复杂内容块中提取文本
+                            for block in msg.content:
+                                if hasattr(block, "type") and block.type == "text":
+                                    content_text += block.text + "\n"
+                                elif isinstance(block, dict) and block.get("type") == "text":
+                                    content_text += block.get("text", "") + "\n"
+                        
+                        if content_text.strip():
+                            global_config.add_conversation_message(
+                                role=msg.role,
+                                content=content_text.strip(),
+                                model_used=request.model
+                            )
+                
+                # 记录助手回复
+                if anthropic_response.content:
+                    assistant_text = ""
+                    for content_block in anthropic_response.content:
+                        # 处理 Pydantic 模型对象
+                        if hasattr(content_block, 'type') and content_block.type == "text":
+                            assistant_text += content_block.text + "\n"
+                        # 处理字典格式
+                        elif isinstance(content_block, dict) and content_block.get("type") == "text":
+                            assistant_text += content_block.get("text", "") + "\n"
+                    
+                    if assistant_text.strip():
+                        global_config.add_conversation_message(
+                            role="assistant",
+                            content=assistant_text.strip(),
+                            model_used=request.model
+                        )
+                        
+            except Exception as conv_error:
+                logger.error(f"Error recording conversation history: {conv_error}")
+            
+            # 记录调试日志 - 包含完整响应内容
+            response_content = ""
+            if hasattr(anthropic_response, 'content') and anthropic_response.content:
+                for content_block in anthropic_response.content:
+                    if hasattr(content_block, 'text'):
+                        response_content += content_block.text
+            
+            global_config.add_debug_log(
+                "response",
+                f"Anthropic messages response: {request.model}",
+                {
+                    "response_id": getattr(anthropic_response, 'id', 'unknown'),
+                    "model": request.model,
+                    "usage": getattr(anthropic_response, 'usage', None).__dict__ if hasattr(anthropic_response, 'usage') else None,
+                    "content": response_content,
+                    "stop_reason": getattr(anthropic_response, 'stop_reason', None),
+                    "full_response": {
+                        "id": getattr(anthropic_response, 'id', 'unknown'),
+                        "type": getattr(anthropic_response, 'type', 'message'),
+                        "role": getattr(anthropic_response, 'role', 'assistant'),
+                        "content": [{"type": "text", "text": response_content}] if response_content else [],
+                        "model": getattr(anthropic_response, 'model', request.model),
+                        "stop_reason": getattr(anthropic_response, 'stop_reason', None),
+                        "usage": getattr(anthropic_response, 'usage', None).__dict__ if hasattr(anthropic_response, 'usage') else None
+                    }
+                }
+            )
+            
             return anthropic_response
                 
     except Exception as e:
@@ -1359,6 +1909,24 @@ async def create_message(
         sanitized_details = sanitize_for_json(error_details)
         logger.error(f"Error processing request: {json.dumps(sanitized_details, indent=2)}")
         
+        # 记录调试日志 - 包含完整错误详情
+        global_config.add_debug_log(
+            "error",
+            f"Request processing error: {type(e).__name__}",
+            {
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "model": getattr(request, 'model', 'unknown'),
+                "full_error_details": sanitized_details,
+                "request_summary": {
+                    "model": getattr(request, 'model', 'unknown'),
+                    "messages_count": len(getattr(request, 'messages', [])),
+                    "stream": getattr(request, 'stream', False),
+                    "max_tokens": getattr(request, 'max_tokens', None)
+                }
+            }
+        )
+        
         # Format error for response
         error_message = f"Error: {str(e)}"
         if 'message' in error_details and error_details['message']:
@@ -1376,6 +1944,11 @@ async def count_tokens(
     raw_request: Request
 ):
     try:
+        # 检查代理服务器是否启用
+        if not global_config.current_config["proxy_enabled"]:
+            # 透明模式：直接转发到 Anthropic API
+            logger.info("🔄 代理禁用，透明转发 count_tokens 到 Anthropic API")
+            return await forward_to_anthropic(request, raw_request)
         # Log the incoming token count request
         original_model = request.original_model or request.model
         
@@ -1453,6 +2026,247 @@ async def count_tokens(
 async def root():
     return {"message": "Anthropic Proxy for LiteLLM"}
 
+@app.get("/models")
+async def get_available_models():
+    """获取所有可用的模型列表和预设配置"""
+    return ModelListResponse(
+        openai_models=OPENAI_MODELS,
+        gemini_models=GEMINI_MODELS,
+        anthropic_models=ANTHROPIC_MODELS,
+        mapping_presets=MAPPING_PRESETS,
+        total_models=len(OPENAI_MODELS) + len(GEMINI_MODELS) + len(ANTHROPIC_MODELS)
+    )
+
+@app.post("/switch_model")
+async def switch_model(request: ConfigUpdateRequest):
+    """动态切换模型配置"""
+    try:
+        # 如果使用预设配置
+        if request.preset:
+            if request.preset not in MAPPING_PRESETS:
+                available_presets = list(MAPPING_PRESETS.keys())
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Invalid preset '{request.preset}'. Available presets: {available_presets}"
+                )
+            
+            preset_config = MAPPING_PRESETS[request.preset]
+            logger.info(f"Applying preset '{request.preset}': {preset_config['description']}")
+            
+            # 应用预设配置
+            global_config.set_models(
+                big_model=preset_config["big_model"],
+                small_model=preset_config["small_model"]
+            )
+            
+            # 获取更新后的配置
+            current_config = global_config.get_status()
+            
+            return ConfigResponse(
+                preferred_provider=current_config["preferred_provider"],
+                big_model=current_config["big_model"],
+                small_model=current_config["small_model"],
+                message=f"Applied preset '{request.preset}': {preset_config['description']}"
+            )
+        
+        # 验证提供商
+        if request.preferred_provider and request.preferred_provider not in ["openai", "google", "anthropic"]:
+            raise HTTPException(status_code=400, detail="Invalid provider. Must be one of: openai, google, anthropic")
+        
+        # 验证模型（现在支持所有三个提供商的模型）
+        all_models = OPENAI_MODELS + GEMINI_MODELS + ANTHROPIC_MODELS
+        
+        if request.big_model and request.big_model not in all_models:
+            logger.warning(f"Big model '{request.big_model}' not in known model lists")
+        
+        if request.small_model and request.small_model not in all_models:
+            logger.warning(f"Small model '{request.small_model}' not in known model lists")
+        
+        # 更新配置
+        global_config.set_models(
+            big_model=request.big_model,
+            small_model=request.small_model
+        )
+        
+        # 获取更新后的配置
+        current_config = global_config.get_status()
+        
+        # 检查是否是跨提供商配置
+        big_provider = get_model_provider(current_config["big_model"])
+        small_provider = get_model_provider(current_config["small_model"])
+        
+        message = "Configuration updated successfully"
+        if big_provider != small_provider and big_provider != "unknown" and small_provider != "unknown":
+            message += f" (Cross-provider setup: {big_provider.upper()} + {small_provider.upper()})"
+        
+        return ConfigResponse(
+            preferred_provider=current_config["preferred_provider"],
+            big_model=current_config["big_model"],
+            small_model=current_config["small_model"],
+            message=message
+        )
+        
+    except Exception as e:
+        logger.error(f"Error updating configuration: {e}")
+        raise HTTPException(status_code=500, detail=f"Error updating configuration: {str(e)}")
+
+@app.get("/config")
+async def get_config():
+    """获取当前配置"""
+    # 获取全局配置状态
+    current_config = global_config.get_status()
+    return ConfigResponse(
+        preferred_provider=current_config["preferred_provider"],
+        big_model=current_config["big_model"],
+        small_model=current_config["small_model"],
+        message="Current configuration"
+    )
+
+@app.post("/sync_config")
+async def sync_config():
+    """与全局配置同步"""
+    # 无需同步，直接使用全局配置
+    global_status = global_config.get_status()
+    
+    return {
+        "message": "Configuration synced with global settings",
+        "proxy_enabled": global_status["proxy_enabled"],
+        "big_model": global_status["big_model"],
+        "small_model": global_status["small_model"],
+        "current_preset": global_status["current_preset"]
+    }
+
+@app.get("/debug_logs")
+async def get_debug_logs(log_type: Optional[str] = None, limit: Optional[int] = None):
+    """获取调试日志"""
+    logs = global_config.get_debug_logs(log_type=log_type, limit=limit)
+    return {
+        "logs": logs,
+        "total_count": len(global_config.debug_logs),
+        "available_types": ["request", "response", "error", "config", "model_switch"]
+    }
+
+@app.delete("/debug_logs")
+async def clear_debug_logs():
+    """清空调试日志"""
+    global_config.clear_debug_logs()
+    return {"message": "Debug logs cleared successfully"}
+
+# 对话记录控制API端点
+@app.get("/conversation/status")
+async def get_conversation_recording_status():
+    """获取对话记录状态"""
+    return global_config.get_conversation_status()
+
+@app.post("/conversation/enable")
+async def enable_conversation_recording(file_path: str):
+    """启用对话记录功能"""
+    success = global_config.enable_conversation_recording(file_path)
+    if success:
+        return {"message": f"Conversation recording enabled, saving to: {file_path}"}
+    else:
+        raise HTTPException(status_code=400, detail="Failed to enable conversation recording")
+
+@app.post("/conversation/disable")
+async def disable_conversation_recording():
+    """禁用对话记录功能"""
+    global_config.disable_conversation_recording()
+    return {"message": "Conversation recording disabled"}
+
+@app.post("/conversation/flush")
+async def flush_conversation_buffer():
+    """强制刷新对话记录缓冲区"""
+    global_config.force_flush_conversations()
+    return {"message": "Conversation buffer flushed to file"}
+
+@app.post("/conversation/load")
+async def load_conversation_from_file(file_path: str):
+    """从文件读取对话记录并替换当前记录"""
+    result = global_config.load_conversation_from_file(file_path)
+    
+    if result["success"]:
+        return {
+            "message": result["message"],
+            "file_path": result["file_path"],
+            "last_record": result["last_record"],
+            "total_records": result["total_records"]
+        }
+    else:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+@app.get("/proxy_server/status")
+async def get_proxy_server_status():
+    """获取代理服务器状态"""
+    return ProxyServerStatusResponse(
+        proxy_server_enabled=global_config.current_config["proxy_enabled"],
+        message="Proxy server is " + ("enabled" if global_config.current_config["proxy_enabled"] else "disabled"),
+        claude_code_should_use_proxy=global_config.current_config["proxy_enabled"]
+    )
+
+@app.post("/proxy_server/toggle")
+async def toggle_proxy_server(request: ProxyServerToggleRequest):
+    """切换代理服务器启用/禁用状态"""
+    try:
+        old_status = global_config.current_config["proxy_enabled"]
+        global_config.current_config["proxy_enabled"] = request.enabled
+        new_status = request.enabled
+        
+        action = "enabled" if new_status else "disabled"
+        change_info = f"changed from {'enabled to disabled' if old_status else 'disabled to enabled'}"
+        
+        return ProxyServerStatusResponse(
+            proxy_server_enabled=new_status,
+            message=f"Proxy server {action} ({change_info})",
+            claude_code_should_use_proxy=new_status
+        )
+        
+    except Exception as e:
+        logger.error(f"Error toggling proxy server: {e}")
+        raise HTTPException(status_code=500, detail=f"Error toggling proxy server: {str(e)}")
+
+@app.post("/proxy_server/enable")
+async def enable_proxy_server():
+    """启用代理服务器"""
+    return await toggle_proxy_server(ProxyServerToggleRequest(enabled=True))
+
+@app.post("/proxy_server/disable")
+async def disable_proxy_server():
+    """禁用代理服务器"""
+    return await toggle_proxy_server(ProxyServerToggleRequest(enabled=False))
+
+@app.post("/conversation/continue")
+async def continue_with_history(request: MessagesRequest):
+    """使用历史对话继续聊天"""
+    try:
+        # 获取历史对话
+        history_messages = global_config.get_conversation_for_model()
+        
+        # 将历史对话与新消息合并
+        all_messages = history_messages + request.messages
+        
+        # 创建新的请求，包含完整的对话历史
+        enhanced_request = MessagesRequest(
+            model=request.model,
+            max_tokens=request.max_tokens,
+            messages=all_messages,
+            system=request.system,
+            stop_sequences=request.stop_sequences,
+            stream=request.stream,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            top_k=request.top_k,
+            metadata=request.metadata,
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            thinking=request.thinking
+        )
+        
+        return {"message": "History integrated", "total_messages": len(all_messages), "messages": all_messages}
+        
+    except Exception as e:
+        logger.error(f"Error continuing with history: {e}")
+        raise HTTPException(status_code=500, detail=f"Error continuing with history: {str(e)}")
+
 # Define ANSI color codes for terminal output
 class Colors:
     CYAN = "\033[96m"
@@ -1497,6 +2311,131 @@ def log_request_beautifully(method, path, claude_model, openai_model, num_messag
     print(log_line)
     print(model_line)
     sys.stdout.flush()
+
+# OpenAI兼容接口 - 用于Claude Code
+class OpenAIMessage(BaseModel):
+    role: str
+    content: str
+
+class OpenAIChatRequest(BaseModel):
+    model: str
+    messages: List[OpenAIMessage]
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    stream: Optional[bool] = False
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: OpenAIChatRequest, raw_request: Request):
+    """OpenAI兼容的chat completions接口，专门用于Claude Code"""
+    try:
+        # 记录调试日志 - 包含完整请求内容
+        messages_content = []
+        for msg in request.messages:
+            messages_content.append({
+                "role": msg.role,
+                "content": msg.content
+            })
+        
+        global_config.add_debug_log(
+            "request",
+            f"OpenAI chat completions request: {request.model}",
+            {
+                "model": request.model,
+                "messages_count": len(request.messages),
+                "messages": messages_content,  # 完整消息内容
+                "stream": request.stream,
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+                "full_request": {
+                    "model": request.model,
+                    "messages": messages_content,
+                    "temperature": request.temperature,
+                    "max_tokens": request.max_tokens,
+                    "stream": request.stream,
+                    "top_p": getattr(request, 'top_p', None),
+                    "frequency_penalty": getattr(request, 'frequency_penalty', None),
+                    "presence_penalty": getattr(request, 'presence_penalty', None),
+                    "stop": getattr(request, 'stop', None)
+                }
+            }
+        )
+        
+        # 转换为Anthropic格式的消息
+        anthropic_messages = []
+        for msg in request.messages:
+            anthropic_messages.append({
+                "role": msg.role,
+                "content": msg.content
+            })
+        
+        # 创建Anthropic请求
+        anthropic_request = MessagesRequest(
+            model=request.model,
+            messages=anthropic_messages,
+            max_tokens=request.max_tokens or 1000,
+            temperature=request.temperature,
+            stream=request.stream
+        )
+        
+        # 调用现有的处理函数
+        response = await create_message(anthropic_request, raw_request)
+        
+        # 如果是流式响应，直接返回
+        if request.stream:
+            return response
+        
+        # 转换为OpenAI格式
+        if hasattr(response, 'content') and response.content:
+            openai_response = {
+                "id": f"chatcmpl-{response.id}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": request.model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": response.content[0].text if response.content else ""
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": response.usage.input_tokens if hasattr(response, 'usage') else 0,
+                    "completion_tokens": response.usage.output_tokens if hasattr(response, 'usage') else 0,
+                    "total_tokens": (response.usage.input_tokens + response.usage.output_tokens) if hasattr(response, 'usage') else 0
+                }
+            }
+            
+            # 记录调试日志 - 包含完整响应内容
+            global_config.add_debug_log(
+                "response",
+                f"OpenAI chat completions response: {request.model}",
+                {
+                    "response_id": openai_response["id"],
+                    "model": request.model,
+                    "finish_reason": "stop",
+                    "usage": openai_response["usage"],
+                    "content": openai_response["choices"][0]["message"]["content"],  # 完整响应内容
+                    "full_response": openai_response  # 完整响应对象
+                }
+            )
+            
+            return openai_response
+        else:
+            return response
+            
+    except Exception as e:
+        # 记录错误日志
+        global_config.add_debug_log(
+            "error",
+            f"OpenAI chat completions error: {str(e)}",
+            {
+                "model": request.model,
+                "error": str(e),
+                "messages_count": len(request.messages)
+            }
+        )
+        raise e
 
 if __name__ == "__main__":
     import sys
