@@ -22,8 +22,8 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/1rgs/claude-code-proxy.git
-cd claude-code-proxy
+git clone https://github.com/catclever/claude-code-flexible-proxy.git
+cd claude-code-flexible-proxy
 
 # 配置环境变量
 cp .env.example .env
@@ -53,8 +53,8 @@ uv run python interactive.py
 
 1. **Clone this repository**:
    ```bash
-   git clone https://github.com/1rgs/claude-code-proxy.git
-   cd claude-code-proxy
+   git clone https://github.com/catclever/claude-code-flexible-proxy.git
+    cd claude-code-flexible-proxy
    ```
 
 2. **Install uv** (if you haven't already):
@@ -492,8 +492,8 @@ curl http://localhost:8082/debug_logs?log_type=all&limit=100
 ### 开发环境设置
 ```bash
 # 克隆仓库
-git clone https://github.com/1rgs/claude-code-proxy.git
-cd claude-code-proxy
+git clone https://github.com/catclever/claude-code-flexible-proxy.git
+cd claude-code-flexible-proxy
 
 # 安装依赖
 uv sync
