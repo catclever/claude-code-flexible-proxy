@@ -192,12 +192,23 @@ class InteractiveApp:
         """启动 FastAPI 服务器"""
         def run_server():
             try:
+                # 配置环境变量，默认显示控制台日志
+                import os
+                os.environ["CLAUDE_PROXY_CONSOLE_LOGS"] = "true"
+                
+                # 配置uvicorn日志，减少控制台输出
+                import logging
+                # 禁用uvicorn的访问日志，只保留错误日志
+                logging.getLogger("uvicorn.access").disabled = True
+                logging.getLogger("uvicorn").setLevel(logging.WARNING)
+                
                 uvicorn.run(
                     "server:app",
                     host="0.0.0.0", 
                     port=self.port,
                     reload=False,
-                    log_level="info"
+                    log_level="warning",  # 只显示警告和错误，隐藏请求日志
+                    access_log=False      # 禁用访问日志
                 )
             except Exception as e:
                 console.print(f"[red]服务器启动失败: {e}[/red]")
@@ -415,30 +426,61 @@ class InteractiveApp:
             console.print("[yellow]🔄 代理已禁用 - 现在将透明转发到 api.anthropic.com[/yellow]")
             console.print("   注意: 需要有效的 ANTHROPIC_API_KEY 或 Claude Pro 认证")
     
+    def toggle_request_logs(self):
+        """切换请求日志显示"""
+        import os
+        
+        current_status = os.getenv("CLAUDE_PROXY_CONSOLE_LOGS", "true").lower() == "true"
+        new_status = not current_status
+        
+        os.environ["CLAUDE_PROXY_CONSOLE_LOGS"] = "true" if new_status else "false"
+        
+        if new_status:
+            console.print("[green]🔊 请求日志显示已启用[/green]")
+            console.print("   现在会在交互区域上方显示：模型映射、工具数量、消息数量等")
+        else:
+            console.print("[yellow]🔇 请求日志显示已禁用[/yellow]")
+            console.print("   现在只显示交互区域的状态信息")
+    
     def show_help(self):
         """显示帮助信息"""
+        console.print("[bold cyan]📋 所有可用命令:[/bold cyan]")
+        
+        menu_options = {
+            "preset": "🎛️  应用预设配置",
+            "config": "🔧 自定义模型配置", 
+            "toggle": "🔄 切换代理状态",
+            "test": "🧪 测试当前配置",
+            "record": "📝 对话记录控制",
+            "load": "📂 读取对话记录文件",
+            "logs": "📜 查看调试日志",
+            "verbose": "🔊 切换请求日志显示",
+            "providers": "📡 查看提供商信息",
+            "presets": "📋 查看预设列表", 
+            "env": "⚙️  重新配置环境变量",
+            "help": "❓ 帮助信息",
+            "quit": "🚪 退出程序（自动清理）"
+        }
+        
+        for key, desc in menu_options.items():
+            console.print(f"  [green]{key}[/green] - {desc}")
+        
         help_text = """
-[bold cyan]🎮 Claude Code 代理服务器 - 交互式管理[/bold cyan]
 
 [bold yellow]功能说明:[/bold yellow]
-• [green]代理启用[/green]: sonnet/haiku 映射到配置的模型，支持跨提供商、对话历史
+• [green]代理启用[/green]: 支持多提供商模型切换、对话历史管理
 • [yellow]代理禁用[/yellow]: 透明转发到 api.anthropic.com，原生 Claude 体验
 
 [bold yellow]使用方式:[/bold yellow]
-• Claude Code 设置: [cyan]ANTHROPIC_BASE_URL=http://localhost:8082[/cyan]
-• 切换模式: 使用本程序的交互菜单动态切换
+• Claude Code 设置: [cyan]ANTHROPIC_BASE_URL=http://localhost:{port}[/cyan]
+• 切换模式: 在命令行输入相应命令
 
 [bold yellow]支持的提供商:[/bold yellow]  
-• OpenAI: 30+ 模型 (GPT-4o, O1系列等)
-• Google: 15+ 模型 (Gemini 1.5/2.0系列)  
-• Anthropic: 13+ 模型 (Claude 3/3.5系列)
-
-[bold yellow]预设配置:[/bold yellow]
-• 单一提供商配置 (OpenAI Only, Gemini Only, Anthropic Only)
-• 跨平台组合配置 (性能优先, 成本优先, 速度优先)
-        """
+• 支持任意 OpenAI 兼容 API 提供商
+• 通过 providers.json 动态配置模型列表
+        """.format(port=self.port)
         
-        console.print(Panel(help_text, title="帮助信息", border_style="blue"))
+        console.print(Panel(help_text, title="系统功能说明", border_style="blue"))
     
     def test_current_config(self):
         """测试当前配置"""
@@ -559,76 +601,115 @@ class InteractiveApp:
             console.print("  1. 应用预设配置")
             console.print("  2. 自定义模型配置")
             
-            # 暂停等待用户操作
-            Prompt.ask("\n[dim]按 Enter 继续进入配置菜单...[/dim]", default="")
+            # 自动进入配置菜单，不需要暂停
     
+    def _show_input_area(self):
+        """显示用户输入提示区域"""
+        # 简洁的分隔和状态显示
+        console.print("\n" + "═" * 30 + " 🎮 用户输入 " + "═" * 30)
+        
+        # 单行状态摘要
+        try:
+            status = config_manager.get_status()
+            if status["proxy_enabled"]:
+                status_line = f"🟢 代理模式 | {status['big_model']} & {status['small_model']} | 端口:{self.port}"
+            else:
+                status_line = f"🔄 透明转发 → api.anthropic.com | 端口:{self.port}"
+        except:
+            status_line = f"⚠️ 配置加载失败 | 端口:{self.port}"
+        
+        console.print(f"[dim]{status_line}[/dim]")
+    
+    def get_valid_commands(self):
+        """获取所有有效命令列表"""
+        return ["preset", "config", "toggle", "test", "record", "load", 
+                "logs", "verbose", "providers", "presets", "env", "help", "quit"]
+    
+    def _draw_bottom_status(self):
+        """在终端底部绘制状态栏"""
+        # 获取终端大小
+        try:
+            import shutil
+            terminal_width = shutil.get_terminal_size().columns
+        except:
+            terminal_width = 80
+            
+        # 状态信息
+        try:
+            status = config_manager.get_status()
+            if status["proxy_enabled"]:
+                status_text = f"🟢 代理模式 | {status['big_model']} & {status['small_model']} | 端口:{self.port}"
+            else:
+                status_text = f"🔄 透明转发 → api.anthropic.com | 端口:{self.port}"
+        except:
+            status_text = f"⚠️ 配置加载失败 | 端口:{self.port}"
+        
+        # 绘制分隔线和状态
+        console.print("\n" + "═" * terminal_width)
+        console.print(f"[dim]{status_text}[/dim]")
+        console.print("─" * terminal_width)
+
     def main_menu(self):
-        """主菜单"""
+        """主菜单 - 简洁的命令循环"""
+        # 首次显示欢迎信息
+        console.clear()
+        console.print(Panel.fit(
+            "[bold blue]🚀 Claude Code 代理服务器[/bold blue]\n"
+            f"服务器状态: {'🟢 运行中' if self.server_running else '🔴 未启动'} | "
+            f"地址: http://localhost:{self.port}",
+            border_style="green"
+        ))
+        
+        console.print("\n[bold cyan]🎯 快速开始:[/bold cyan]")
+        console.print("  • 输入 [green]help[/green] 查看所有可用命令")
+        console.print("  • 输入 [green]test[/green] 测试当前配置")
+        console.print("  • 输入 [green]quit[/green] 安全退出")
+        console.print("\n[dim]服务器请求日志将在上方显示...[/dim]")
+        
         while True:
-            console.clear()
-            
-            # 显示标题
-            console.print(Panel.fit(
-                "[bold blue]🚀 Claude Code 代理服务器[/bold blue]\n"
-                f"服务器状态: {'🟢 运行中' if self.server_running else '🔴 未启动'} | "
-                f"地址: http://localhost:{self.port}",
-                border_style="green"
-            ))
-            
-            # 显示当前状态
-            self.show_status()
-            
-            # 显示菜单选项
-            console.print("\n[bold cyan]📋 可用命令:[/bold cyan]")
-            menu_options = {
-                "preset": "🎛️  应用预设配置",
-                "config": "🔧 自定义模型配置", 
-                "toggle": "🔄 切换代理状态",
-                "test": "🧪 测试当前配置",
-                "record": "📝 对话记录控制",
-                "load": "📂 读取对话记录文件",
-                "logs": "📜 查看调试日志",
-                "providers": "📡 查看提供商信息",
-                "presets": "📋 查看预设列表", 
-                "env": "⚙️  重新配置环境变量",
-                "help": "❓ 帮助信息",
-                "quit": "🚪 退出程序（自动清理）"
-            }
-            
-            for key, desc in menu_options.items():
-                console.print(f"  [green]{key}[/green] - {desc}")
-            
-            choice = Prompt.ask("\n请输入命令", choices=list(menu_options.keys()))
-            
-            if choice == "preset":
-                self.apply_preset_interactive()
-            elif choice == "config":
-                self.custom_model_config()
-            elif choice == "toggle":
-                self.toggle_proxy_interactive()
-            elif choice == "test":
-                self.test_current_config()
-            elif choice == "record":
-                self.conversation_record_control()
-            elif choice == "load":
-                self.load_conversation_file()
-            elif choice == "logs":
-                self.view_debug_logs()
-            elif choice == "providers":
-                self.show_providers()
-            elif choice == "presets":
-                self.show_presets()
-            elif choice == "env":
-                self.reconfigure_env()
-            elif choice == "help":
-                self.show_help()
-            elif choice == "quit":
-                console.print("[yellow]👋 正在安全退出...[/yellow]")
+            try:
+                # 绘制底部状态栏
+                self._draw_bottom_status()
+                
+                # 获取用户输入
+                choice = Prompt.ask("[bold cyan]claude-proxy>[/bold cyan] 请输入命令", 
+                                  choices=self.get_valid_commands(),
+                                  show_choices=False)
+                
+                # 处理命令
+                if choice == "preset":
+                    self.apply_preset_interactive()
+                elif choice == "config":
+                    self.custom_model_config()
+                elif choice == "toggle":
+                    self.toggle_proxy_interactive()
+                elif choice == "test":
+                    self.test_current_config()
+                elif choice == "record":
+                    self.conversation_record_control()
+                elif choice == "load":
+                    self.load_conversation_file()
+                elif choice == "logs":
+                    self.view_debug_logs()
+                elif choice == "verbose":
+                    self.toggle_request_logs()
+                elif choice == "providers":
+                    self.show_providers()
+                elif choice == "presets":
+                    self.show_presets()
+                elif choice == "env":
+                    self.reconfigure_env()
+                elif choice == "help":
+                    self.show_help()
+                elif choice == "quit":
+                    console.print("[yellow]👋 正在安全退出...[/yellow]")
+                    self.cleanup()
+                    break
+                
+            except KeyboardInterrupt:
+                console.print("\n[yellow]👋 程序被中断，正在退出...[/yellow]")
                 self.cleanup()
                 break
-            
-            if choice != "quit":
-                Prompt.ask("\n[dim]按 Enter 继续...[/dim]", default="")
     
     def run(self, port=None):
         """运行应用"""

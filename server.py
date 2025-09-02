@@ -2281,6 +2281,13 @@ class Colors:
     DIM = "\033[2m"
 def log_request_beautifully(method, path, claude_model, openai_model, num_messages, num_tools, status_code):
     """Log requests in a beautiful, twitter-friendly format showing Claude to OpenAI mapping."""
+    # 检查是否应该显示控制台日志（可通过环境变量控制）
+    import os
+    show_console_logs = os.getenv("CLAUDE_PROXY_CONSOLE_LOGS", "true").lower() == "true"
+    
+    if not show_console_logs:
+        return  # 不显示控制台日志
+    
     # Format the Claude model name nicely
     claude_display = f"{Colors.CYAN}{claude_model}{Colors.RESET}"
     
