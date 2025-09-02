@@ -1520,6 +1520,103 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
         # Send final [DONE] marker
         yield "data: [DONE]\n\n"
 
+
+async def forward_to_anthropic(request: Union[MessagesRequest, TokenCountRequest], raw_request: Request):
+    """Forward requests directly to Anthropic API when proxy is disabled."""
+    try:
+        # Debug: Log all request headers to understand what Claude Code is sending
+        logger.info(f"🔍 透明代理调试 - 收到的请求头部: {dict(raw_request.headers)}")
+        
+        # For Claude Pro users, we should use the original authentication completely
+        # Check if we have ANTHROPIC_API_KEY set (manual API key users)
+        has_env_api_key = bool(ANTHROPIC_API_KEY)
+        
+        logger.info(f"🔍 透明代理调试 - 环境变量API密钥: {'存在' if has_env_api_key else '不存在'}")
+        
+        # If no manual API key is set, this is likely a Claude Pro user
+        # and we should preserve ALL original authentication
+        if not has_env_api_key:
+            logger.info("🔍 透明代理调试 - 检测到Claude Pro用户，保持原始认证")
+            # Don't modify any headers - pass everything through as-is
+            pass
+        else:
+            logger.info("🔍 透明代理调试 - 检测到API密钥用户，使用环境变量密钥")
+            # For users with manual API keys, ensure they're used
+        
+        # Determine the endpoint based on the request path
+        path = raw_request.url.path
+        if path == "/v1/messages/count_tokens":
+            anthropic_url = "https://api.anthropic.com/v1/messages/count_tokens"
+        else:
+            anthropic_url = "https://api.anthropic.com/v1/messages"
+        
+        # Get the original request body
+        body = await raw_request.body()
+        
+        # Start with all original headers except host
+        headers = dict(raw_request.headers)
+        headers.pop("host", None)
+        
+        # Handle authentication based on user type
+        if not has_env_api_key:
+            # Claude Pro user - keep all original headers as-is
+            logger.info("🔍 透明代理调试 - Claude Pro用户，保持所有原始头部")
+        else:
+            # API key user - use environment variable
+            logger.info("🔍 透明代理调试 - API密钥用户，覆盖认证头部")
+            headers["x-api-key"] = ANTHROPIC_API_KEY
+            # Remove any existing authorization to avoid conflicts
+            headers.pop("authorization", None)
+        
+        # Ensure anthropic-version is set
+        if "anthropic-version" not in headers:
+            headers["anthropic-version"] = "2023-06-01"
+            
+        logger.info(f"🔍 透明代理调试 - 发送到Anthropic的头部: {dict(headers)}")
+        
+        # Forward the request to Anthropic API
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(
+                anthropic_url,
+                headers=headers,
+                content=body
+            )
+            
+            # Check if the request was successful
+            if response.status_code != 200:
+                logger.error(f"Anthropic API error: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Anthropic API error: {response.text}"
+                )
+            
+            # For streaming responses
+            if request.stream if hasattr(request, 'stream') else False:
+                async def stream_response():
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+                
+                return StreamingResponse(
+                    stream_response(),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+                )
+            else:
+                # For non-streaming responses, return JSON
+                return JSONResponse(
+                    content=response.json(),
+                    status_code=response.status_code
+                )
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error forwarding to Anthropic API: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error forwarding to Anthropic API: {str(e)}"
+        )
+
 @app.post("/v1/messages")
 async def create_message(
     request: MessagesRequest,
