@@ -110,6 +110,7 @@ class ConfigManager:
         # 初始化配置，尝试加载default预设
         self.current_config = {
             "proxy_enabled": True,
+            "super_model": None,
             "big_model": None,
             "small_model": None,
             "current_preset": None
@@ -123,9 +124,11 @@ class ConfigManager:
         if "default" in self.presets:
             preset = self.presets["default"]
             # 验证default预设的模型是否可用
-            if (self.validate_model(preset["big_model"]) and 
-                self.validate_model(preset["small_model"])):
+            if (self.validate_model(preset.get("super_model", preset["big_model"]))[0] and
+                self.validate_model(preset["big_model"])[0] and 
+                self.validate_model(preset["small_model"])[0]):
                 self.current_config.update({
+                    "super_model": preset.get("super_model", preset["big_model"]),
                     "big_model": preset["big_model"],
                     "small_model": preset["small_model"],
                     "current_preset": "default"
@@ -151,30 +154,50 @@ class ConfigManager:
                 return provider_name
         return None
     
-    def validate_model(self, model_name: str) -> bool:
-        """验证模型是否存在且提供商可用"""
+    def validate_model(self, model_name: str) -> (bool, str):
+        """验证模型是否存在且提供商可用，返回 (bool, reason)"""
         provider_name = self.find_model_provider(model_name)
         if not provider_name:
-            return False
-        return self.providers[provider_name].is_available
+            return False, f"模型 '{model_name}' 在任何提供商中都未找到"
+        
+        provider = self.providers[provider_name]
+        if not provider.is_available:
+            return False, f"'{provider.name}' 提供商的API密钥 ({provider.api_key_env}) 未配置"
+            
+        return True, ""
     
-    def apply_preset(self, preset_name: str) -> bool:
-        """应用预设配置"""
+    def apply_preset(self, preset_name: str) -> (bool, str):
+        """应用预设配置，返回 (bool, message)"""
         if preset_name not in self.presets:
-            return False
+            return False, f"预设 '{preset_name}' 不存在"
             
         preset = self.presets[preset_name]
         
-        # 验证模型可用性
-        if not self.validate_model(preset["big_model"]):
-            return False
-        if not self.validate_model(preset["small_model"]):
-            return False
+        # --- 安全地验证所有存在的模型 ---
+        super_model = preset.get("super_model")
+        if super_model:
+            is_valid, reason = self.validate_model(super_model)
+            if not is_valid:
+                return False, f"超级模型配置失败: {reason}"
+
+        big_model = preset.get("big_model")
+        if big_model:
+            is_valid, reason = self.validate_model(big_model)
+            if not is_valid:
+                return False, f"大模型配置失败: {reason}"
+
+        small_model = preset.get("small_model")
+        if small_model:
+            is_valid, reason = self.validate_model(small_model)
+            if not is_valid:
+                return False, f"小模型配置失败: {reason}"
         
+        # --- 安全地更新配置 ---
         old_config = self.current_config.copy()
         self.current_config.update({
-            "big_model": preset["big_model"],
-            "small_model": preset["small_model"], 
+            "super_model": preset.get("super_model"),
+            "big_model": preset.get("big_model"),
+            "small_model": preset.get("small_model"), 
             "current_preset": preset_name
         })
         
@@ -184,21 +207,38 @@ class ConfigManager:
             f"Applied preset: {preset_name}",
             {
                 "preset_name": preset_name,
+                "old_super_model": old_config.get("super_model"),
                 "old_big_model": old_config.get("big_model"),
                 "old_small_model": old_config.get("small_model"),
-                "new_big_model": preset["big_model"],
-                "new_small_model": preset["small_model"]
+                "new_super_model": self.current_config["super_model"],
+                "new_big_model": self.current_config["big_model"],
+                "new_small_model": self.current_config["small_model"]
             }
         )
-        return True
+        return True, f"成功应用预设 '{preset_name}'"
     
-    def set_models(self, big_model: str, small_model: str) -> bool:
+    def set_models(self, big_model: str, small_model: str, super_model: Optional[str] = None) -> (bool, str):
         """手动设置模型"""
-        if not self.validate_model(big_model) or not self.validate_model(small_model):
-            return False
+        # 如果未提供super_model，则默认使用big_model
+        if super_model is None:
+            super_model = big_model
+
+        # 验证所有模型
+        is_valid, reason = self.validate_model(super_model)
+        if not is_valid:
+            return False, f"超级模型配置失败: {reason}"
+            
+        is_valid, reason = self.validate_model(big_model)
+        if not is_valid:
+            return False, f"大模型配置失败: {reason}"
+
+        is_valid, reason = self.validate_model(small_model)
+        if not is_valid:
+            return False, f"小模型配置失败: {reason}"
             
         old_config = self.current_config.copy()
         self.current_config.update({
+            "super_model": super_model,
             "big_model": big_model,
             "small_model": small_model,
             "current_preset": None  # 清除预设
@@ -209,13 +249,15 @@ class ConfigManager:
             "config", 
             "Manual model configuration",
             {
+                "old_super_model": old_config.get("super_model"),
                 "old_big_model": old_config.get("big_model"),
                 "old_small_model": old_config.get("small_model"),
+                "new_super_model": super_model,
                 "new_big_model": big_model,
                 "new_small_model": small_model
             }
         )
-        return True
+        return True, "模型配置成功"
     
     def toggle_proxy(self) -> bool:
         """切换代理状态"""
@@ -228,6 +270,7 @@ class ConfigManager:
         
         return {
             "proxy_enabled": self.current_config["proxy_enabled"],
+            "super_model": self.current_config["super_model"],
             "big_model": self.current_config["big_model"],
             "small_model": self.current_config["small_model"],
             "current_preset": self.current_config["current_preset"],
@@ -315,17 +358,18 @@ class ConfigManager:
         print("✅ 对话记录已禁用")
     
     def add_conversation_message(self, role: str, content: str, model_used: str, timestamp: Optional[str] = None):
-        """添加对话消息到记录（仅记录用户发送给AI的内容）"""
-        if not self.conversation_recording_enabled or role != "user":
-            return  # 只记录用户消息，不记录助手回复
+        """添加对话消息到记录（记录完整对话：user + assistant）"""
+        if not self.conversation_recording_enabled:
+            return  # 记录所有角色的消息
         
         from datetime import datetime
         if timestamp is None:
             timestamp = datetime.now().isoformat()
         
-        # 简化记录格式，只保留核心信息
+        # 完整记录格式，保留角色信息
         message = {
-            "user_input": content,
+            "role": role,
+            "content": content,
             "timestamp": timestamp,
             "model_used": model_used
         }
@@ -408,6 +452,100 @@ class ConfigManager:
         """强制刷新对话记录缓冲区"""
         if self.conversation_buffer:
             self._flush_conversation_buffer()
+
+    def restore_conversation_from_logs(self) -> (int, str):
+        """
+        从调试日志中重建对话历史.
+        返回 (restored_count, message).
+        """
+        if not self.conversation_recording_enabled:
+            return 0, "对话记录功能未启用，无法恢复。"
+
+        restored_messages = []
+        logs = self.get_debug_logs() # 获取所有日志
+        
+        # 筛选出请求和响应日志
+        req_res_logs = [log for log in logs if log.get("type") in ["request", "response"]]
+        
+        i = 0
+        while i < len(req_res_logs):
+            log = req_res_logs[i]
+            if log.get("type") == "request":
+                # 这是一个请求，寻找下一个响应
+                if i + 1 < len(req_res_logs) and req_res_logs[i+1].get("type") == "response":
+                    request_log = log
+                    response_log = req_res_logs[i+1]
+                    
+                    # 提取用户消息
+                    user_content = ""
+                    try:
+                        messages = request_log["details"]["full_request"]["messages"]
+                        for msg in reversed(messages):
+                            if msg.get("role") == "user":
+                                raw_content = msg.get("content")
+                                if isinstance(raw_content, str):
+                                    user_content = raw_content
+                                    break
+                                elif isinstance(raw_content, list):
+                                    text_parts = [block.get("text", "") for block in raw_content if isinstance(block, dict) and block.get("type") == "text"]
+                                    user_content = "\n".join(text_parts)
+                                    break
+                    except (KeyError, TypeError):
+                        i += 2
+                        continue
+
+                    # 提取助手消息
+                    assistant_content = ""
+                    try:
+                        assistant_content = response_log["details"]["content"]
+                    except KeyError:
+                        i += 2
+                        continue
+
+                    model_used = request_log.get("details", {}).get("model", "unknown")
+                    
+                    if user_content:
+                        restored_messages.append({
+                            "role": "user",
+                            "content": user_content,
+                            "timestamp": request_log["timestamp"],
+                            "model_used": model_used
+                        })
+                    
+                    if assistant_content:
+                         restored_messages.append({
+                            "role": "assistant",
+                            "content": assistant_content,
+                            "timestamp": response_log["timestamp"],
+                            "model_used": model_used
+                        })
+                    
+                    i += 2 # Move to the next pair
+                else:
+                    i += 1 # Unmatched request, skip
+            else:
+                i += 1 # Unmatched response, skip
+
+        if not restored_messages:
+            return 0, "在日志中未找到可恢复的成对请求/响应。"
+
+        # --- 覆盖历史记录 ---
+        # 1. 清空缓冲区
+        self.conversation_buffer = []
+        self.last_conversations = []
+        
+        # 2. 覆盖文件
+        try:
+            with open(self.conversation_file_path, 'w', encoding='utf-8') as f:
+                for message in restored_messages:
+                    f.write(json.dumps(message, ensure_ascii=False) + '\n')
+        except Exception as e:
+            return 0, f"写入历史文件失败: {e}"
+
+        # 3. 重新加载最近的对话记录用于去重
+        self._load_recent_conversations()
+        
+        return len(restored_messages), f"成功从日志中恢复 {len(restored_messages)} 条对话消息。"
     
     def load_conversation_from_file(self, file_path: str) -> Dict[str, Any]:
         """从文件读取对话记录并替换当前记录"""

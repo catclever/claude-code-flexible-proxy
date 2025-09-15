@@ -90,8 +90,7 @@ class DynamicConfig:
         self.preferred_provider = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
         self.big_model = os.environ.get("BIG_MODEL", "gpt-4.1")
         self.small_model = os.environ.get("SMALL_MODEL", "gpt-4.1-mini")
-        self.conversation_history = []  # 存储对话历史
-        self.max_history = 100  # 最大对话历史数量
+        self.conversation_history = []  # 存储对话历史（无限制，由Claude Code管理）
         
         # 代理服务器模式控制
         self.proxy_server_enabled = os.environ.get("PROXY_SERVER_ENABLED", "true").lower() == "true"
@@ -150,10 +149,6 @@ class DynamicConfig:
         }
         
         self.conversation_history.append(message)
-        
-        # 保持历史记录数量在限制内
-        if len(self.conversation_history) > self.max_history:
-            self.conversation_history = self.conversation_history[-self.max_history:]
     
     def get_conversation_history(self, limit=None):
         """获取对话历史"""
@@ -175,21 +170,30 @@ class DynamicConfig:
         """清空对话历史"""
         self.conversation_history = []
     
+    def update_conversation_from_messages(self, messages, model_used="unknown"):
+        """从完整messages列表更新对话历史"""
+        # 清空当前历史，用新的messages列表替换
+        self.conversation_history = []
+        
+        for msg in messages:
+            if msg.get('role') in ['user', 'assistant']:
+                self.add_conversation_message(
+                    role=msg['role'],
+                    content=msg.get('content', ''),
+                    model_used=model_used
+                )
+    
     def add_request_log(self, request_data):
         """保持原有接口兼容性，但现在主要用于内部记录"""
-        # 这里可以提取消息并添加到对话历史
+        # 用完整messages列表更新对话历史
         if request_data.get('body') and request_data.get('method') == 'POST':
             body = request_data['body']
             if 'messages' in body:
-                # 提取最新的用户消息
-                for msg in body['messages']:
-                    if msg.get('role') in ['user', 'assistant']:
-                        self.add_conversation_message(
-                            role=msg['role'],
-                            content=msg.get('content', ''),
-                            model_used=request_data.get('model', 'unknown'),
-                            timestamp=request_data.get('timestamp')
-                        )
+                # 全量更新对话历史（Claude Code每次发送完整消息列表）
+                self.update_conversation_from_messages(
+                    messages=body['messages'],
+                    model_used=request_data.get('model', 'unknown')
+                )
     
     def get_request_logs(self, limit=None):
         """保持原有接口兼容性，转换格式"""
@@ -468,10 +472,11 @@ class MessagesRequest(BaseModel):
 
         # 从新配置系统获取当前设置
         current_config = global_config.get_status()
+        super_model = current_config["super_model"]
         big_model = current_config["big_model"]
         small_model = current_config["small_model"]
         
-        logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', BIG='{big_model}', SMALL='{small_model}'")
+        logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', SUPER='{super_model}', BIG='{big_model}', SMALL='{small_model}'")
 
         # Remove provider prefixes for easier matching
         clean_v = v
@@ -485,13 +490,19 @@ class MessagesRequest(BaseModel):
         # --- Enhanced Mapping Logic --- START ---
         mapped = False
         
-        # Map Haiku to small_model (simple mapping without provider prefix)
-        if 'haiku' in clean_v.lower():
+        # Map Opus to super_model
+        if 'opus' in clean_v.lower():
+            new_model = super_model
+            mapped = True
+            logger.debug(f"🔄 OPUS MAPPING: '{original_model}' → '{new_model}' (super_model={super_model})")
+        
+        # Map Haiku to small_model
+        elif 'haiku' in clean_v.lower():
             new_model = small_model
             mapped = True
             logger.debug(f"🔄 HAIKU MAPPING: '{original_model}' → '{new_model}' (small_model={small_model})")
 
-        # Map Sonnet to big_model (simple mapping without provider prefix)
+        # Map Sonnet to big_model
         elif 'sonnet' in clean_v.lower():
             new_model = big_model
             mapped = True
@@ -537,17 +548,16 @@ class TokenCountRequest(BaseModel):
     @field_validator('model')
     def validate_model_token_count(cls, v, info): # Renamed to avoid conflict
         # Use the same logic as MessagesRequest validator
-        # NOTE: Pydantic validators might not share state easily if not class methods
-        # Re-implementing the logic here for clarity, could be refactored
         original_model = v
         new_model = v # Default to original value
 
         # 从新配置系统获取当前设置
         current_config = global_config.get_status()
+        super_model = current_config["super_model"]
         big_model = current_config["big_model"]
         small_model = current_config["small_model"]
         
-        logger.debug(f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', BIG='{big_model}', SMALL='{small_model}'")
+        logger.debug(f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', SUPER='{super_model}', BIG='{big_model}', SMALL='{small_model}'")
 
         # Remove provider prefixes for easier matching
         clean_v = v
@@ -560,13 +570,19 @@ class TokenCountRequest(BaseModel):
 
         # --- Mapping Logic --- START ---
         mapped = False
-        # Map Haiku to small_model (simple mapping without provider prefix)
-        if 'haiku' in clean_v.lower():
+        # Map Opus to super_model
+        if 'opus' in clean_v.lower():
+            new_model = super_model
+            mapped = True
+            logger.debug(f"🔄 OPUS TOKEN MAPPING: '{original_model}' → '{new_model}' (super_model={super_model})")
+        
+        # Map Haiku to small_model
+        elif 'haiku' in clean_v.lower():
             new_model = small_model
             mapped = True
             logger.debug(f"🔄 HAIKU TOKEN MAPPING: '{original_model}' → '{new_model}' (small_model={small_model})")
 
-        # Map Sonnet to big_model (simple mapping without provider prefix)
+        # Map Sonnet to big_model
         elif 'sonnet' in clean_v.lower():
             new_model = big_model
             mapped = True
@@ -799,71 +815,64 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                 messages.append({"role": "system", "content": system_text.strip()})
     
     # Add conversation messages
-    for idx, msg in enumerate(anthropic_request.messages):
+    for msg in anthropic_request.messages:
         content = msg.content
-        if isinstance(content, str):
-            messages.append({"role": msg.role, "content": content})
-        else:
-            # Special handling for tool_result in user messages
-            # OpenAI/LiteLLM format expects the assistant to call the tool, 
-            # and the user's next message to include the result as plain text
-            if msg.role == "user" and any(block.type == "tool_result" for block in content if hasattr(block, "type")):
-                # For user messages with tool_result, split into separate messages
-                text_content = ""
-                
-                # Extract all text parts and concatenate them
+        role = msg.role
+        
+        # Check if content is a list of blocks
+        if isinstance(content, list):
+            is_tool_result_message = any(getattr(block, 'type', None) == 'tool_result' for block in content)
+            is_tool_use_message = any(getattr(block, 'type', None) == 'tool_use' for block in content)
+
+            # --- BUG FIX: Correctly handle tool_result from user ---
+            if role == "user" and is_tool_result_message:
                 for block in content:
-                    if hasattr(block, "type"):
-                        if block.type == "text":
-                            text_content += block.text + "\n"
-                        elif block.type == "tool_result":
-                            # Add tool result as a message by itself - simulate the normal flow
-                            tool_id = block.tool_use_id if hasattr(block, "tool_use_id") else ""
-                            
-                            # Handle different formats of tool result content
-                            result_content = ""
-                            if hasattr(block, "content"):
-                                if isinstance(block.content, str):
-                                    result_content = block.content
-                                elif isinstance(block.content, list):
-                                    # If content is a list of blocks, extract text from each
-                                    for content_block in block.content:
-                                        if hasattr(content_block, "type") and content_block.type == "text":
-                                            result_content += content_block.text + "\n"
-                                        elif isinstance(content_block, dict) and content_block.get("type") == "text":
-                                            result_content += content_block.get("text", "") + "\n"
-                                        elif isinstance(content_block, dict):
-                                            # Handle any dict by trying to extract text or convert to JSON
-                                            if "text" in content_block:
-                                                result_content += content_block.get("text", "") + "\n"
-                                            else:
-                                                try:
-                                                    result_content += json.dumps(content_block) + "\n"
-                                                except:
-                                                    result_content += str(content_block) + "\n"
-                                elif isinstance(block.content, dict):
-                                    # Handle dictionary content
-                                    if block.content.get("type") == "text":
-                                        result_content = block.content.get("text", "")
-                                    else:
-                                        try:
-                                            result_content = json.dumps(block.content)
-                                        except:
-                                            result_content = str(block.content)
-                                else:
-                                    # Handle any other type by converting to string
-                                    try:
-                                        result_content = str(block.content)
-                                    except:
-                                        result_content = "Unparseable content"
-                            
-                            # In OpenAI format, tool results come from the user (rather than being content blocks)
-                            text_content += f"Tool result for {tool_id}:\n{result_content}\n"
+                    if getattr(block, 'type', None) == 'tool_result':
+                        # Convert to OpenAI's 'tool' role message
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": block.tool_use_id,
+                            "content": parse_tool_result_content(block.content)
+                        })
+                    elif getattr(block, 'type', None) == 'text' and block.text.strip():
+                        # If there's other text, add it as a separate user message
+                        messages.append({"role": "user", "content": block.text})
+            
+            # --- BUG FIX: Correctly handle tool_use from assistant history ---
+            elif role == "assistant" and is_tool_use_message:
+                tool_calls = []
+                text_parts = []
+                for block in content:
+                    if getattr(block, 'type', None) == 'tool_use':
+                        # Arguments must be a JSON string for OpenAI format
+                        arguments_str = json.dumps(block.input)
+                        tool_calls.append({
+                            "id": block.id,
+                            "type": "function",
+                            "function": {
+                                "name": block.name,
+                                "arguments": arguments_str
+                            }
+                        })
+                    elif getattr(block, 'type', None) == 'text':
+                        text_parts.append(block.text)
                 
-                # Add as a single user message with all the content
-                messages.append({"role": "user", "content": text_content.strip()})
+                # Create an assistant message with tool_calls
+                assistant_message = {
+                    "role": "assistant",
+                    "content": " ".join(text_parts).strip() or None,
+                    "tool_calls": tool_calls
+                }
+                # content can be None if there are only tool_calls, which is valid
+                if assistant_message["content"] is None:
+                    del assistant_message["content"]
+                    
+                messages.append(assistant_message)
+
+            # --- Original logic for other complex content (e.g., images) ---
             else:
-                # Regular handling for other message types
+                # Fallback for messages with other kinds of blocks (like images)
+                # This part might need refinement if you use other block types
                 processed_content = []
                 for block in content:
                     if hasattr(block, "type"):
@@ -871,39 +880,11 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                             processed_content.append({"type": "text", "text": block.text})
                         elif block.type == "image":
                             processed_content.append({"type": "image", "source": block.source})
-                        elif block.type == "tool_use":
-                            # Handle tool use blocks if needed
-                            processed_content.append({
-                                "type": "tool_use",
-                                "id": block.id,
-                                "name": block.name,
-                                "input": block.input
-                            })
-                        elif block.type == "tool_result":
-                            # Handle different formats of tool result content
-                            processed_content_block = {
-                                "type": "tool_result",
-                                "tool_use_id": block.tool_use_id if hasattr(block, "tool_use_id") else ""
-                            }
-                            
-                            # Process the content field properly
-                            if hasattr(block, "content"):
-                                if isinstance(block.content, str):
-                                    # If it's a simple string, create a text block for it
-                                    processed_content_block["content"] = [{"type": "text", "text": block.content}]
-                                elif isinstance(block.content, list):
-                                    # If it's already a list of blocks, keep it
-                                    processed_content_block["content"] = block.content
-                                else:
-                                    # Default fallback
-                                    processed_content_block["content"] = [{"type": "text", "text": str(block.content)}]
-                            else:
-                                # Default empty content
-                                processed_content_block["content"] = [{"type": "text", "text": ""}]
-                                
-                            processed_content.append(processed_content_block)
-                
-                messages.append({"role": msg.role, "content": processed_content})
+                messages.append({"role": role, "content": processed_content})
+        
+        # Handle simple string content
+        else:
+            messages.append({"role": role, "content": content})
     
     # Cap max_tokens for OpenAI models to their limit of 16384
     max_tokens = anthropic_request.max_tokens
@@ -953,6 +934,14 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
 
             # Clean the schema if targeting a Gemini model
             input_schema = tool_dict.get("input_schema", {})
+
+            # --- FIX: Validate and normalize the input schema ---
+            # Some backends hang on invalid or empty schemas (e.g., {}).
+            # A valid JSON Schema for function parameters must be an object.
+            if not isinstance(input_schema, dict) or "type" not in input_schema or "properties" not in input_schema:
+                logger.warning(f"Tool '{tool_dict['name']}' has an invalid or empty input_schema. Normalizing to a valid empty schema. Original: {input_schema}")
+                input_schema = {"type": "object", "properties": {}}
+            
             if is_gemini_model:
                  logger.debug(f"Cleaning schema for Gemini tool: {tool_dict.get('name')}")
                  input_schema = clean_gemini_schema(input_schema)
@@ -1053,8 +1042,8 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
         if content_text is not None and content_text != "":
             content.append({"type": "text", "text": content_text})
         
-        # Add tool calls if present (tool_use in Anthropic format) - only for Claude models
-        if tool_calls and is_claude_model:
+        # Add tool calls if present (tool_use in Anthropic format)
+        if tool_calls:
             logger.debug(f"Processing tool calls: {tool_calls}")
             
             # Convert to list if it's not already
@@ -1092,47 +1081,6 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
                     "name": name,
                     "input": arguments
                 })
-        elif tool_calls and not is_claude_model:
-            # For non-Claude models, convert tool calls to text format
-            logger.debug(f"Converting tool calls to text for non-Claude model: {clean_model}")
-            
-            # We'll append tool info to the text content
-            tool_text = "\n\nTool usage:\n"
-            
-            # Convert to list if it's not already
-            if not isinstance(tool_calls, list):
-                tool_calls = [tool_calls]
-                
-            for idx, tool_call in enumerate(tool_calls):
-                # Extract function data based on whether it's a dict or object
-                if isinstance(tool_call, dict):
-                    function = tool_call.get("function", {})
-                    tool_id = tool_call.get("id", f"tool_{uuid.uuid4()}")
-                    name = function.get("name", "")
-                    arguments = function.get("arguments", "{}")
-                else:
-                    function = getattr(tool_call, "function", None)
-                    tool_id = getattr(tool_call, "id", f"tool_{uuid.uuid4()}")
-                    name = getattr(function, "name", "") if function else ""
-                    arguments = getattr(function, "arguments", "{}") if function else "{}"
-                
-                # Convert string arguments to dict if needed
-                if isinstance(arguments, str):
-                    try:
-                        args_dict = json.loads(arguments)
-                        arguments_str = json.dumps(args_dict, indent=2)
-                    except json.JSONDecodeError:
-                        arguments_str = arguments
-                else:
-                    arguments_str = json.dumps(arguments, indent=2)
-                
-                tool_text += f"Tool: {name}\nArguments: {arguments_str}\n\n"
-            
-            # Add or append tool text to content
-            if content and content[0]["type"] == "text":
-                content[0]["text"] += tool_text
-            else:
-                content.append({"type": "text", "text": tool_text})
         
         # Get usage information - extract values safely from object or dict
         if isinstance(usage_info, dict):
@@ -1511,6 +1459,18 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
         error_message = f"Error in streaming: {str(e)}\n\nFull traceback:\n{error_traceback}"
         logger.error(error_message)
         
+        # 记录失败的响应日志
+        global_config.add_debug_log(
+            "response",
+            f"Streaming response error for: {original_request.model}",
+            {
+                "model": original_request.model,
+                "error": error_message,
+                "stop_reason": "error",
+                "usage": {"input_tokens": 0, "output_tokens": 0}
+            }
+        )
+        
         # Send error message_delta
         yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'error', 'stop_sequence': None}, 'usage': {'output_tokens': 0}})}\n\n"
         
@@ -1519,6 +1479,65 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
         
         # Send final [DONE] marker
         yield "data: [DONE]\n\n"
+    finally:
+        # --- 日志记录 ---
+        # 在流式传输成功结束后，记录完整的响应日志
+        if not has_sent_stop_reason: # Fallback for streams that end without a finish_reason
+            stop_reason = "end_turn"
+        
+        # 记录完整的对话历史
+        try:
+            # 记录用户消息
+            for msg in original_request.messages:
+                if msg.role in ['user', 'assistant']:
+                    content_text = ""
+                    if isinstance(msg.content, str):
+                        content_text = msg.content
+                    elif isinstance(msg.content, list):
+                        for block in msg.content:
+                            if hasattr(block, "type") and block.type == "text":
+                                content_text += block.text + "\n"
+                            elif isinstance(block, dict) and block.get("type") == "text":
+                                content_text += block.get("text", "") + "\n"
+                    
+                    if content_text.strip():
+                        global_config.add_conversation_message(
+                            role=msg.role,
+                            content=content_text.strip(),
+                            model_used=original_request.model
+                        )
+            
+            # 记录助手回复
+            if full_response_text.strip():
+                global_config.add_conversation_message(
+                    role="assistant",
+                    content=full_response_text.strip(),
+                    model_used=original_request.model
+                )
+        except Exception as conv_error:
+            logger.error(f"Error recording streaming conversation history (finally block): {conv_error}")
+
+        # 记录完整的调试日志
+        global_config.add_debug_log(
+            "response",
+            f"Streaming response complete for: {original_request.model}",
+            {
+                "response_id": message_id,
+                "model": original_request.model,
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+                "content": full_response_text,
+                "stop_reason": stop_reason,
+                "full_response": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": full_response_text}],
+                    "model": original_request.model,
+                    "stop_reason": stop_reason,
+                    "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}
+                }
+            }
+        )
 
 
 async def forward_to_anthropic(request: Union[MessagesRequest, TokenCountRequest], raw_request: Request):
@@ -1552,6 +1571,23 @@ async def forward_to_anthropic(request: Union[MessagesRequest, TokenCountRequest
         
         # Get the original request body
         body = await raw_request.body()
+        
+        # --- Start: Consistent Logging ---
+        try:
+            body_json = json.loads(body.decode('utf-8'))
+            global_config.add_debug_log(
+                "request",
+                f"Transparent forward request: {body_json.get('model', 'unknown')}",
+                {
+                    "model": body_json.get('model', 'unknown'),
+                    "messages_count": len(body_json.get('messages', [])),
+                    "stream": body_json.get('stream', False),
+                    "full_request": body_json
+                }
+            )
+        except json.JSONDecodeError:
+            logger.warning("Could not parse request body for transparent forward logging.")
+        # --- End: Consistent Logging ---
         
         # Start with all original headers except host
         headers = dict(raw_request.headers)
@@ -1592,19 +1628,70 @@ async def forward_to_anthropic(request: Union[MessagesRequest, TokenCountRequest
             
             # For streaming responses
             if request.stream if hasattr(request, 'stream') else False:
-                async def stream_response():
+                async def stream_and_log_response():
+                    full_response_bytes = b""
                     async for chunk in response.aiter_bytes():
+                        full_response_bytes += chunk
                         yield chunk
-                
+                    
+                    try:
+                        full_response_text = full_response_bytes.decode('utf-8')
+                        response_content = ""
+                        for line in full_response_text.splitlines():
+                            if line.startswith('data:'):
+                                data_str = line[len('data:'):].strip()
+                                if data_str != '[DONE]':
+                                    try:
+                                        data_json = json.loads(data_str)
+                                        if data_json.get('type') == 'content_block_delta':
+                                            delta = data_json.get('delta', {})
+                                            if delta.get('type') == 'text_delta':
+                                                response_content += delta.get('text', '')
+                                    except json.JSONDecodeError:
+                                        pass
+                        
+                        global_config.add_debug_log(
+                            "response",
+                            f"Transparent streaming response complete for: {request.model}",
+                            {
+                                "model": request.model,
+                                "content": response_content,
+                                "stop_reason": "end_turn",
+                                "full_response": full_response_text
+                            }
+                        )
+                    except Exception as log_e:
+                        logger.error(f"Error logging transparent streaming response: {log_e}")
+
                 return StreamingResponse(
-                    stream_response(),
+                    stream_and_log_response(),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
                 )
             else:
                 # For non-streaming responses, return JSON
+                response_json = response.json()
+                
+                response_content = ""
+                if 'content' in response_json and isinstance(response_json['content'], list):
+                    for block in response_json['content']:
+                        if block.get('type') == 'text':
+                            response_content += block.get('text', '')
+                
+                global_config.add_debug_log(
+                    "response",
+                    f"Transparent response: {request.model}",
+                    {
+                        "model": request.model,
+                        "usage": response_json.get('usage'),
+                        "content": response_content,
+                        "stop_reason": response_json.get('stop_reason'),
+                        "full_response": response_json
+                    }
+                )
+                
                 return JSONResponse(
-                    content=response.json(),
+                    content=response_json,
                     status_code=response.status_code
                 )
                 
@@ -1847,6 +1934,9 @@ async def create_message(
         # Only log basic info about the request, not the full details
         logger.debug(f"Request for model: {litellm_request.get('model')}, stream: {litellm_request.get('stream', False)}")
         
+        # Add a timeout to the request
+        litellm_request['timeout'] = 300  # 300 seconds timeout
+
         # Handle streaming mode
         if request.stream:
             # Use LiteLLM for streaming

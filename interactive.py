@@ -330,26 +330,51 @@ class InteractiveApp:
         table = Table(title="🎛️ 预设配置", show_header=True, header_style="bold green")
         table.add_column("预设名", style="cyan")
         table.add_column("名称", style="yellow")
-        table.add_column("大模型", style="green")
-        table.add_column("小模型", style="blue") 
+        table.add_column("Super 模型", style="red", no_wrap=True)
+        table.add_column("大模型", style="green", no_wrap=True)
+        table.add_column("小模型", style="blue", no_wrap=True)
         table.add_column("类型", style="magenta")
         table.add_column("描述")
         
         for preset_id, preset in MODEL_PRESETS.items():
             provider_type = "🌐 跨平台" if preset["provider"] == "mixed" else f"🔸 {preset['provider']}"
             
+            # 如果模型字段缺失，则显示 N/A
+            super_model = preset.get("super_model") or "[red]🔴 N/A[/red]"
+            big_model = preset.get("big_model") or "[red]🔴 N/A[/red]"
+            small_model = preset.get("small_model") or "[red]🔴 N/A[/red]"
+            
             table.add_row(
                 preset_id,
                 preset["name"],
-                preset["big_model"],
-                preset["small_model"], 
+                super_model,
+                big_model,
+                small_model, 
                 provider_type,
                 preset["description"]
             )
         
         console.print(table)
+
+    def apply_preset_by_name(self, preset_id: str):
+        """通过名称应用预设"""
+        if preset_id not in MODEL_PRESETS:
+            console.print(f"[red]❌ 预设 '{preset_id}' 不存在。[/red]")
+            console.print(f"   可用预设: {', '.join(MODEL_PRESETS.keys())}")
+            return
+
+        success, message = config_manager.apply_preset(preset_id)
+
+        if success:
+            preset = MODEL_PRESETS[preset_id]
+            console.print(f"[green]✅ 已应用预设: {preset['name']}[/green]")
+            console.print(f"   Super 模型: {preset.get('super_model', preset.get('big_model', 'N/A'))}")
+            console.print(f"   大模型: {preset['big_model']}")
+            console.print(f"   小模型: {preset['small_model']}")
+        else:
+            console.print(f"[red]❌ 预设应用失败: {message}[/red]")
     
-    def apply_preset_interactive(self):
+    def apply_preset_interactive(self):    
         """交互式应用预设"""
         self.show_presets()
         
@@ -364,16 +389,8 @@ class InteractiveApp:
             try:
                 choice = Prompt.ask("请输入预设编号", choices=[str(i) for i in range(1, len(preset_choices)+1)])
                 preset_id = preset_choices[int(choice) - 1]
-                
-                if config_manager.apply_preset(preset_id):
-                    preset = MODEL_PRESETS[preset_id]
-                    console.print(f"[green]✅ 已应用预设: {preset['name']}[/green]")
-                    console.print(f"   大模型: {preset['big_model']}")
-                    console.print(f"   小模型: {preset['small_model']}")
-                    break
-                else:
-                    console.print("[red]❌ 预设应用失败，请检查API密钥配置[/red]")
-                    break
+                self.apply_preset_by_name(preset_id)
+                break
             except (ValueError, KeyError):
                 console.print("[red]无效选择，请重新输入[/red]")
     
@@ -672,36 +689,52 @@ class InteractiveApp:
                 self._draw_bottom_status()
                 
                 # 获取用户输入
-                choice = Prompt.ask("[bold cyan]claude-proxy>[/bold cyan] 请输入命令", 
-                                  choices=self.get_valid_commands(),
-                                  show_choices=False)
+                user_input = Prompt.ask("[bold cyan]claude-proxy>[/bold cyan]")
+                parts = user_input.strip().split()
+                if not parts:
+                    continue
                 
+                command = parts[0].lower()
+                args = parts[1:]
+                
+                # 验证命令
+                if command not in self.get_valid_commands():
+                    console.print(f"[red]❌ 未知命令: '{command}'[/red]")
+                    console.print("   输入 [green]help[/green] 查看所有可用命令。")
+                    continue
+
                 # 处理命令
-                if choice == "preset":
-                    self.apply_preset_interactive()
-                elif choice == "config":
+                if command == "preset":
+                    if args:
+                        self.apply_preset_by_name(args[0])
+                    else:
+                        self.apply_preset_interactive()
+                elif command == "config":
                     self.custom_model_config()
-                elif choice == "toggle":
+                elif command == "toggle":
                     self.toggle_proxy_interactive()
-                elif choice == "test":
+                elif command == "test":
                     self.test_current_config()
-                elif choice == "record":
+                elif command == "record":
                     self.conversation_record_control()
-                elif choice == "load":
+                elif command == "load":
                     self.load_conversation_file()
-                elif choice == "logs":
+                elif command == "logs":
                     self.view_debug_logs()
-                elif choice == "verbose":
+                elif command == "verbose":
                     self.toggle_request_logs()
-                elif choice == "providers":
+                elif command == "providers":
                     self.show_providers()
-                elif choice == "presets":
-                    self.show_presets()
-                elif choice == "env":
+                elif command == "presets":
+                    if args:
+                        self.apply_preset_by_name(args[0])
+                    else:
+                        self.show_presets()
+                elif command == "env":
                     self.reconfigure_env()
-                elif choice == "help":
+                elif command == "help":
                     self.show_help()
-                elif choice == "quit":
+                elif command == "quit":
                     console.print("[yellow]👋 正在安全退出...[/yellow]")
                     self.cleanup()
                     break
@@ -919,6 +952,7 @@ class InteractiveApp:
                     "detail": "📝 详细视图（完整内容）",
                     "recent": "🕒 查看最近10条",
                     "type": "🏷️  按类型筛选",
+                    "record": "🔄 记录对话",
                     "export": "💾 导出到文件",
                     "history": "📚 查看历史日志文件",
                     "clear": "🗑️  清空日志",
@@ -969,7 +1003,11 @@ class InteractiveApp:
                                 self._display_logs_detail(type_logs, f"{log_type} 类型日志")
                         else:
                             console.print("[red]❌ 获取日志失败[/red]")
-                    
+                
+                elif choice == "record":
+                    self.restore_history()
+                    return
+
                 elif choice == "export":
                     self._export_logs_to_file(logs)
                 
@@ -1051,11 +1089,24 @@ class InteractiveApp:
         console.print(f"\n[bold cyan]📋 {title} ({len(logs)} 条):[/bold cyan]")
         console.print("[dim]" + "="*80 + "[/dim]")
         
+        def truncate_long_strings(data, limit=2000):
+            """递归地截断数据结构中过长的字符串"""
+            if isinstance(data, dict):
+                return {k: truncate_long_strings(v, limit) for k, v in data.items()}
+            elif isinstance(data, list):
+                return [truncate_long_strings(item, limit) for item in data]
+            elif isinstance(data, str) and len(data) > limit:
+                return data[:limit] + f"\n\n[bold red]... (内容已截断, 剩余 {len(data) - limit} 字符)[/bold red]"
+            return data
+
         for i, log in enumerate(logs, 1):
             timestamp = log.get("timestamp", "N/A")
             log_type = log.get("type", "unknown")
             message = log.get("message", "")
             details = log.get("details", {})
+            
+            # 对详情内容进行截断处理
+            display_details = truncate_long_strings(details)
             
             # 根据日志类型设置颜色
             if log_type == "error":
@@ -1072,63 +1123,27 @@ class InteractiveApp:
             console.print(f"[cyan]🏷️  类型:[/cyan] [{type_color}]{log_type}[/{type_color}]")
             console.print(f"[cyan]💬 消息:[/cyan] {message}")
             
-            if details:
+            if display_details:
                 console.print(f"[cyan]📝 详情:[/cyan]")
                 
-                # 特殊处理请求和响应日志，优先显示关键信息
-                if log_type in ["request", "response"]:
-                    # 显示关键信息摘要
-                    if "model" in details:
-                        console.print(f"   [yellow]🎯 模型:[/yellow] {details['model']}")
-                    if "messages_count" in details:
-                        console.print(f"   [yellow]💬 消息数:[/yellow] {details['messages_count']}")
-                    if "usage" in details and details["usage"]:
-                        usage = details["usage"]
-                        console.print(f"   [yellow]📊 用量:[/yellow] 输入:{usage.get('prompt_tokens', 0)} | 输出:{usage.get('completion_tokens', 0)} | 总计:{usage.get('total_tokens', 0)}")
-                    if "content" in details and details["content"]:
-                        content_preview = details["content"][:200] + "..." if len(details["content"]) > 200 else details["content"]
-                        console.print(f"   [yellow]📄 内容预览:[/yellow] {content_preview}")
-                    
-                    # 显示完整请求/响应（如果存在）
-                    full_data = details.get("full_request") or details.get("full_response")
-                    if full_data:
-                        console.print(f"   [yellow]📋 完整内容:[/yellow]")
+                # 其他类型日志的通用格式化显示
+                import json
+                try:
+                    if isinstance(display_details, str):
+                        # 如果details是字符串，尝试解析为JSON
                         try:
-                            formatted_full = json.dumps(full_data, indent=4, ensure_ascii=False)
-                            for line in formatted_full.split('\n'):
-                                console.print(f"      {line}")
+                            details_obj = json.loads(display_details)
+                            formatted_details = json.dumps(details_obj, indent=2, ensure_ascii=False)
                         except:
-                            console.print(f"      {str(full_data)}")
+                            formatted_details = display_details
+                    else:
+                        formatted_details = json.dumps(display_details, indent=2, ensure_ascii=False)
                     
-                    # 显示其他详情
-                    other_details = {k: v for k, v in details.items() if k not in ["model", "messages_count", "usage", "content", "full_request", "full_response"]}
-                    if other_details:
-                        console.print(f"   [yellow]🔧 其他信息:[/yellow]")
-                        try:
-                            formatted_other = json.dumps(other_details, indent=4, ensure_ascii=False)
-                            for line in formatted_other.split('\n'):
-                                console.print(f"      {line}")
-                        except:
-                            console.print(f"      {str(other_details)}")
-                else:
-                    # 其他类型日志的通用格式化显示
-                    import json
-                    try:
-                        if isinstance(details, str):
-                            # 如果details是字符串，尝试解析为JSON
-                            try:
-                                details_obj = json.loads(details)
-                                formatted_details = json.dumps(details_obj, indent=2, ensure_ascii=False)
-                            except:
-                                formatted_details = details
-                        else:
-                            formatted_details = json.dumps(details, indent=2, ensure_ascii=False)
-                        
-                        # 添加缩进
-                        for line in formatted_details.split('\n'):
-                            console.print(f"   {line}")
-                    except:
-                        console.print(f"   {str(details)}")
+                    # 添加缩进
+                    for line in formatted_details.split('\n'):
+                        console.print(f"   {line}")
+                except:
+                    console.print(f"   {str(display_details)}")
             
             if i < len(logs):
                 console.print("[dim]" + "-"*60 + "[/dim]")
@@ -1361,6 +1376,34 @@ class InteractiveApp:
             console.print(f"[red]❌ 文件格式错误: {file_info['name']} 不是有效的JSON文件[/red]")
         except Exception as e:
             console.print(f"[red]❌ 读取文件失败: {e}[/red]")
+
+    def restore_history(self):
+        """从调试日志恢复对话历史"""
+        console.print("\n[bold cyan]🔄 从调试日志恢复对话历史[/bold cyan]")
+        
+        # 检查对话记录是否启用
+        try:
+            response = requests.get(f"http://localhost:{self.port}/conversation/status", timeout=5)
+            if response.status_code != 200 or not response.json().get('recording_enabled'):
+                console.print("[red]❌ 操作失败: 对话记录功能未启用。[/red]")
+                console.print("   请先使用 'record' 命令启用对话记录。")
+                return
+        except requests.RequestException:
+            console.print("[red]❌ 无法连接到服务器检查对话记录状态。[/red]")
+            return
+
+        if not config_manager.get_debug_logs():
+            console.print("[yellow]⚠️ 暂无调试日志可用于恢复。[/yellow]")
+            return
+
+        if Confirm.ask("这将覆盖当前的对话历史文件，是否继续？", default=False):
+            count, message = config_manager.restore_conversation_from_logs()
+            if count > 0:
+                console.print(f"[green]✅ {message}[/green]")
+            else:
+                console.print(f"[yellow]⚠️ {message}[/yellow]")
+        else:
+            console.print("[yellow]取消操作。[/yellow]")
 
 def main():
     """主函数"""
