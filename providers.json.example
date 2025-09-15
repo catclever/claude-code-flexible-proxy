@@ -85,56 +85,64 @@
       "description": "默认配置，使用OpenAI的GPT-4o系列，提供最佳综合性能",
       "super_model": "gpt-4o",
       "big_model": "gpt-4o",
-      "small_model": "gpt-4o-mini"
+      "small_model": "gpt-4o-mini",
+      "provider": "openai"
     },
     "openai_premium": {
       "name": "OpenAI 高端组合",
       "description": "GPT-4o + GPT-4o Mini，平衡性能和成本",
       "super_model": "gpt-4o",
       "big_model": "gpt-4o",
-      "small_model": "gpt-4o-mini"
+      "small_model": "gpt-4o-mini",
+      "provider": "openai"
     },
     "openai_reasoning": {
       "name": "OpenAI 推理优化",
       "description": "O1 + GPT-4o Mini，专注推理能力",
       "super_model": "o1-preview",
       "big_model": "o1-preview",
-      "small_model": "gpt-4o-mini"
+      "small_model": "gpt-4o-mini",
+      "provider": "openai"
     },
     "gemini_balanced": {
       "name": "Gemini 平衡组合",
       "description": "Gemini Pro + Flash，Google AI 体验",
       "super_model": "gemini-1.5-pro",
       "big_model": "gemini-1.5-pro",
-      "small_model": "gemini-1.5-flash"
+      "small_model": "gemini-1.5-flash",
+      "provider": "google"
     },
     "anthropic_pure": {
       "name": "Anthropic 纯净体验",
       "description": "Claude 3.5 Sonnet + Haiku，原生体验",
       "super_model": "claude-3-opus-20240229",
       "big_model": "claude-3-5-sonnet-20240620",
-      "small_model": "claude-3-haiku-20240307"
+      "small_model": "claude-3-haiku-20240307",
+      "provider": "anthropic"
     },
     "cross_premium": {
       "name": "跨平台高端组合",
       "description": "GPT-4o + Gemini Flash，最佳性能组合",
       "super_model": "gpt-4o",
       "big_model": "gpt-4o",
-      "small_model": "gemini-1.5-flash"
+      "small_model": "gemini-1.5-flash",
+      "provider": "mixed"
     },
     "cross_balanced": {
       "name": "跨平台平衡组合",
       "description": "Gemini Pro + GPT-4o Mini，经济实用",
       "super_model": "gemini-1.5-pro",
       "big_model": "gemini-1.5-pro",
-      "small_model": "gpt-4o-mini"
+      "small_model": "gpt-4o-mini",
+      "provider": "mixed"
     },
     "cross_speed": {
       "name": "跨平台速度优先",
       "description": "Claude Haiku + Gemini Flash，最快响应",
       "super_model": "claude-3-opus-20240229",
       "big_model": "claude-3-5-sonnet-20240620",
-      "small_model": "gemini-1.5-flash"
+      "small_model": "gemini-1.5-flash",
+      "provider": "mixed"
     }
   }
 }
