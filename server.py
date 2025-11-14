@@ -837,6 +837,9 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                     elif getattr(block, 'type', None) == 'text' and block.text.strip():
                         # If there's other text, add it as a separate user message
                         messages.append({"role": "user", "content": block.text})
+                    elif getattr(block, 'type', None) == 'thinking':
+                        # Filter out thinking blocks in user tool_result messages
+                        continue
             
             # --- BUG FIX: Correctly handle tool_use from assistant history ---
             elif role == "assistant" and is_tool_use_message:
@@ -856,6 +859,9 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                         })
                     elif getattr(block, 'type', None) == 'text':
                         text_parts.append(block.text)
+                    elif getattr(block, 'type', None) == 'thinking':
+                        # Filter out thinking blocks in assistant tool_use messages
+                        continue
                 
                 # Create an assistant message with tool_calls
                 assistant_message = {
@@ -880,6 +886,10 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                             processed_content.append({"type": "text", "text": block.text})
                         elif block.type == "image":
                             processed_content.append({"type": "image", "source": block.source})
+                        elif block.type == "thinking":
+                            # Filter out thinking blocks - they are Claude's internal reasoning
+                            # and not compatible with other API providers
+                            continue
                 messages.append({"role": role, "content": processed_content})
         
         # Handle simple string content

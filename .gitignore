@@ -25,6 +25,7 @@ wheels/
 
 # Virtual environments
 venv/
+.venv/
 env/
 ENV/
 
@@ -65,3 +66,8 @@ conversation_history.json
 model_cache/
 providers.json
 CLAUDE.md
+.claude/
+
+# packages
+*package/
+*package
